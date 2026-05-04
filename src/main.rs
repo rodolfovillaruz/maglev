@@ -36,6 +36,28 @@ fn prompt_yes_no(question: &str) -> bool {
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+fn prompt_client_email() -> Result<String, Box<dyn std::error::Error>> {
+    print!("  Enter client email: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read from stdin: {e}"))?;
+
+    let email = line.trim().to_string();
+
+    if email.is_empty() {
+        Err("Client email cannot be empty. Aborted.".into())
+    } else {
+        Ok(email)
+    }
+}
+
 fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> {
     use rand::rngs::OsRng;
     use rsa::{
@@ -56,10 +78,6 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 // Step 1 — GOOGLE_APPLICATION_CREDENTIALS
 // ---------------------------------------------------------------------------
 
-/// Returns:
-///   `Some(Ok((private_key, client_email)))` – env var was set and file parsed
-///   `Some(Err(...))` – env var was set but something went wrong
-///   `None`           – env var is not set; caller should fall through to step 2
 fn step1_google_application_credentials(
 ) -> Option<Result<(String, String), Box<dyn std::error::Error>>> {
     let path = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()?;
@@ -128,10 +146,10 @@ fn step2_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Er
         pem
     };
 
-    // client_email must be supplied separately when using a raw key file
-    let client_email = env::var("MAGLEV_CLIENT_EMAIL").map_err(|_| {
-        "MAGLEV_CLIENT_EMAIL environment variable is not set \
-         (required when using MAGLEV_PRIVATE_KEY)"
+    // Try to get client_email from environment variable, or prompt if not set
+    let client_email = env::var("MAGLEV_CLIENT_EMAIL").or_else(|_| {
+        println!("  MAGLEV_CLIENT_EMAIL not set.");
+        prompt_client_email()
     })?;
 
     Ok((private_key, client_email))
