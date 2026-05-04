@@ -59,15 +59,14 @@ fn prompt_client_email() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> {
-    use rand::rngs::OsRng;
     use rsa::{
-        pkcs8::{EncodePrivateKey, LineEnding},
         RsaPrivateKey,
+        pkcs8::{EncodePrivateKey, LineEnding},
     };
 
     println!("  Generating RSA-2048 private key (this may take a moment)...");
 
-    let mut rng = OsRng;
+    let mut rng = rsa::rand_core::OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, 2048)?;
     let pem = private_key.to_pkcs8_pem(LineEnding::LF)?;
 
@@ -78,8 +77,8 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 // Step 1 — GOOGLE_APPLICATION_CREDENTIALS
 // ---------------------------------------------------------------------------
 
-fn step1_google_application_credentials(
-) -> Option<Result<(String, String), Box<dyn std::error::Error>>> {
+fn step1_google_application_credentials()
+-> Option<Result<(String, String), Box<dyn std::error::Error>>> {
     let path = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()?;
 
     println!("[Step 1] GOOGLE_APPLICATION_CREDENTIALS = {path}");
