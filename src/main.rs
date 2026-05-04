@@ -237,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let credentials = ServiceAccountCredentials {
         credential_type: "service_account".to_string(),
-        private_key,
+        private_key: private_key.clone(),
         client_email: client_email.clone(),
     };
 
@@ -259,5 +259,189 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("⚠ Keep this file secure!");
     }
 
+    // ── Create a VM instance ────────────────────────────────────────────────
+
+    if prompt_yes_no("\nCreate a VM instance now?") {
+        // Project ID: explicit env var, or derived from
+        // "<sa>@<PROJECT_ID>.iam.gserviceaccount.com".
+        let project_id = if let Ok(p) = env::var("MAGLEV_PROJECT_ID") {
+            p
+        } else {
+            client_email
+                .split('@')
+                .nth(1)
+                .and_then(|domain| domain.split('.').next())
+                .map(|s| s.to_string())
+                .ok_or("Cannot derive project ID from client_email; set MAGLEV_PROJECT_ID")?
+        };
+
+        let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "us-central1-a".to_string());
+        let machine_type =
+            env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-micro".to_string());
+        let instance_name = env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| {
+            format!(
+                "maglev-vm-{}",
+                time::OffsetDateTime::now_utc().unix_timestamp()
+            )
+        });
+
+        println!("\n── Creating VM instance ────────────────────────────────────────────────");
+        println!("  Project:      {project_id}");
+        println!("  Zone:         {zone}");
+        println!("  Machine type: {machine_type}");
+        println!("  Name:         {instance_name}");
+
+        println!("  Signing JWT with RSA-SHA256 (PEM-native)...");
+        let jwt = create_jwt(
+            &private_key,
+            &client_email,
+            "https://www.googleapis.com/auth/compute",
+        )?;
+
+        println!("  Exchanging JWT for OAuth2 access token...");
+        let access_token = get_access_token(&jwt)?;
+
+        println!("  Calling Compute Engine API...");
+        let response = create_vm(
+            &access_token,
+            &project_id,
+            &zone,
+            &instance_name,
+            &machine_type,
+        )?;
+
+        println!("\n✓ VM creation requested. Operation response:\n");
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// JWT (RS256) — signed directly with the RSA PEM, no JSON credentials needed.
+// ---------------------------------------------------------------------------
+
+fn b64url(input: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
+}
+
+fn create_jwt(
+    private_key_pem: &str,
+    client_email: &str,
+    scope: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use rsa::{RsaPrivateKey, pkcs1v15::Pkcs1v15Sign, pkcs8::DecodePrivateKey};
+    use sha2::{Digest, Sha256};
+
+    // Parse the PEM directly — this is the "native PEM" path.
+    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)?;
+
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let exp = now + 3600;
+
+    let header = r#"{"alg":"RS256","typ":"JWT"}"#;
+    let claims = format!(
+        r#"{{"iss":"{}","scope":"{}","aud":"https://oauth2.googleapis.com/token","exp":{},"iat":{}}}"#,
+        client_email, scope, exp, now
+    );
+
+    let signing_input = format!(
+        "{}.{}",
+        b64url(header.as_bytes()),
+        b64url(claims.as_bytes())
+    );
+    let hash = Sha256::digest(signing_input.as_bytes());
+
+    // PKCS#1 v1.5 DigestInfo prefix for SHA-256.
+    // We use `new_unprefixed` and prepend the prefix manually to avoid
+    // tying the rsa crate to a specific sha2 version via type parameters.
+    const SHA256_DIGEST_INFO: [u8; 19] = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+    let mut to_sign = Vec::with_capacity(SHA256_DIGEST_INFO.len() + hash.len());
+    to_sign.extend_from_slice(&SHA256_DIGEST_INFO);
+    to_sign.extend_from_slice(&hash);
+
+    let signature = private_key.sign(Pkcs1v15Sign::new_unprefixed(), &to_sign)?;
+
+    Ok(format!("{}.{}", signing_input, b64url(&signature)))
+}
+
+fn get_access_token(jwt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let mut resp = agent
+        .post("https://oauth2.googleapis.com/token")
+        .send_form([
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", jwt),
+        ])?;
+
+    let status = resp.status();
+    let body: Value = resp.body_mut().read_json()?;
+
+    if !status.is_success() {
+        return Err(format!("Token endpoint returned HTTP {status}: {body}").into());
+    }
+
+    body["access_token"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("No access_token in response: {body}").into())
+}
+
+fn create_vm(
+    access_token: &str,
+    project_id: &str,
+    zone: &str,
+    instance_name: &str,
+    machine_type: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let url = format!(
+        "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances"
+    );
+
+    let request_body = serde_json::json!({
+        "name": instance_name,
+        "machineType": format!("zones/{zone}/machineTypes/{machine_type}"),
+        "disks": [{
+            "boot": true,
+            "autoDelete": true,
+            "initializeParams": {
+                "sourceImage": "projects/debian-cloud/global/images/family/debian-12"
+            }
+        }],
+        "networkInterfaces": [{
+            "network": "global/networks/default",
+            "accessConfigs": [{
+                "type": "ONE_TO_ONE_NAT",
+                "name": "External NAT"
+            }]
+        }]
+    });
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let mut resp = agent
+        .post(&url)
+        .header("Authorization", &format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .send_json(request_body)?;
+
+    let status = resp.status();
+    let body: Value = resp.body_mut().read_json()?;
+
+    if !status.is_success() {
+        return Err(format!("Compute Engine API returned HTTP {status}: {body}").into());
+    }
+
+    Ok(body)
 }
