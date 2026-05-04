@@ -216,12 +216,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Public key & fingerprint ─────────────────────────────────────────────
 
-    let (public_cert_pem, fingerprint) = public_key_info(&private_key, &client_email)?;
+    let (public_cert_pem, _) = public_key_info(&private_key, &client_email)?;
 
     println!("\n── Public certificate (RSA_X509_PEM) ──────────────────────────────────\n");
     println!("{public_cert_pem}");
-    println!("SHA-256 fingerprint (certificate DER):");
-    println!("  {fingerprint}\n");
     println!("Upload steps:");
     println!("  • IAM & Admin → Service Accounts → {client_email} → Keys");
     println!("    → Add Key → Upload public key, and paste the certificate above.");
