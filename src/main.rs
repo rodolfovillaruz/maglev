@@ -74,36 +74,46 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 }
 
 // ---------------------------------------------------------------------------
-// Derive public key PEM + SHA-256 fingerprint from a PKCS#8 private key PEM.
+// Build a self-signed X.509 certificate from the RSA private key.
 //
-// The fingerprint is the SHA-256 hash of the DER-encoded SubjectPublicKeyInfo
-// (SPKI) structure — the same value Google Cloud displays as the key ID when
-// you upload your own public key to a service account.
+// Google Cloud's "Upload public key" expects an RSA_X509_PEM, i.e. a
+// PEM-encoded X.509 certificate (NOT a bare SPKI public key).
 // ---------------------------------------------------------------------------
 
-fn public_key_info(private_key_pem: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    use rsa::{
-        RsaPrivateKey,
-        pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding},
-    };
+fn public_key_info(
+    private_key_pem: &str,
+    client_email: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
     use sha2::{Digest, Sha256};
+    use time::{Duration, OffsetDateTime};
 
-    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)?;
-    let public_key = private_key.to_public_key();
+    // rcgen detects RSA from the PKCS#8 PEM and signs the cert with it.
+    let key_pair = KeyPair::from_pem(private_key_pem)?;
 
-    let pem = public_key.to_public_key_pem(LineEnding::LF)?;
-    let der = public_key.to_public_key_der()?;
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, client_email);
+    params.distinguished_name = dn;
 
-    let digest = Sha256::digest(der.as_bytes());
-    // Colon-separated lowercase hex — matches the format shown by
-    // `openssl pkey -pubin -in key.pub -outform DER | openssl dgst -sha256`
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - Duration::minutes(5);
+    params.not_after = now + Duration::days(365 * 10);
+
+    let cert = params.self_signed(&key_pair)?;
+    let cert_pem = cert.pem();
+    let cert_der = cert.der();
+
+    // Google displays the SHA-256 of the certificate DER as the key id
+    // for uploaded user-managed keys. Render it as colon-separated hex.
+    let digest = Sha256::digest(cert_der.as_ref());
     let fingerprint = digest
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(":");
 
-    Ok((pem, fingerprint))
+    Ok((cert_pem, fingerprint))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,23 +216,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Public key & fingerprint ─────────────────────────────────────────────
 
-    let (public_key_pem, fingerprint) = public_key_info(&private_key)?;
+    let (public_cert_pem, fingerprint) = public_key_info(&private_key, &client_email)?;
 
-    println!("\n── Public key ──────────────────────────────────────────────────────────\n");
-    println!("{public_key_pem}");
-    println!("SHA-256 fingerprint (SPKI/DER):");
+    println!("\n── Public certificate (RSA_X509_PEM) ──────────────────────────────────\n");
+    println!("{public_cert_pem}");
+    println!("SHA-256 fingerprint (certificate DER):");
     println!("  {fingerprint}\n");
-    println!("Verify this key is attached to your Google service account:");
-    println!("  • Upload the public key above to your service account, then check that");
-    println!("    the fingerprint shown in IAM & Admin → Service Accounts → Keys");
-    println!("    matches the SHA-256 value printed here.");
-    println!("  • Or confirm via the CLI:");
-    println!("      gcloud iam service-accounts keys list \\");
+    println!("Upload steps:");
+    println!("  • IAM & Admin → Service Accounts → {client_email} → Keys");
+    println!("    → Add Key → Upload public key, and paste the certificate above.");
+    println!("  • Or via CLI:");
+    println!("      gcloud iam service-accounts keys upload cert.pem \\");
     println!("        --iam-account={client_email}");
-    println!("    and cross-check the key ID against the fingerprint.");
-    println!("  • To compute it yourself from the saved public key file:");
-    println!("      openssl pkey -pubin -in pub.pem -outform DER \\");
-    println!("        | openssl dgst -sha256\n");
+    println!("  • Verify locally with:");
+    println!("      openssl x509 -in cert.pem -noout -fingerprint -sha256");
 
     // ── Credentials JSON ─────────────────────────────────────────────────────
 
