@@ -200,6 +200,8 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
+
     println!("=== Maglev Credential Builder ===\n");
 
     let (private_key, client_email) = match load_google_application_credentials() {
@@ -231,15 +233,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Credentials JSON ─────────────────────────────────────────────────────
 
-    println!("── Credentials ─────────────────────────────────────────────────────────\n");
+    println!("\n── Credentials ─────────────────────────────────────────────────────────\n");
 
     let credentials = ServiceAccountCredentials {
         credential_type: "service_account".to_string(),
         private_key,
-        client_email,
+        client_email: client_email.clone(),
     };
 
-    println!("{}", serde_json::to_string_pretty(&credentials)?);
+    let json_str = serde_json::to_string_pretty(&credentials)?;
+    println!("{json_str}");
+
+    // ── Save credentials ────────────────────────────────────────────────────
+
+    if prompt_yes_no("\nSave credentials to file?") {
+        let filename = format!(
+            "maglev-credentials-{}.json",
+            client_email.split('@').next().unwrap_or("account")
+        );
+
+        let json_str = serde_json::to_string_pretty(&credentials)?;
+        fs::write(&filename, json_str).map_err(|e| format!("Cannot write credentials: {e}"))?;
+
+        println!("✓ Credentials saved to: {filename}");
+        println!("⚠ Keep this file secure!");
+    }
 
     Ok(())
 }
