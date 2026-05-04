@@ -74,14 +74,47 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 }
 
 // ---------------------------------------------------------------------------
-// Step 1 — GOOGLE_APPLICATION_CREDENTIALS
+// Derive public key PEM + SHA-256 fingerprint from a PKCS#8 private key PEM.
+//
+// The fingerprint is the SHA-256 hash of the DER-encoded SubjectPublicKeyInfo
+// (SPKI) structure — the same value Google Cloud displays as the key ID when
+// you upload your own public key to a service account.
 // ---------------------------------------------------------------------------
 
-fn step1_google_application_credentials()
+fn public_key_info(private_key_pem: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    use rsa::{
+        RsaPrivateKey,
+        pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding},
+    };
+    use sha2::{Digest, Sha256};
+
+    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)?;
+    let public_key = private_key.to_public_key();
+
+    let pem = public_key.to_public_key_pem(LineEnding::LF)?;
+    let der = public_key.to_public_key_der()?;
+
+    let digest = Sha256::digest(der.as_bytes());
+    // Colon-separated lowercase hex — matches the format shown by
+    // `openssl pkey -pubin -in key.pub -outform DER | openssl dgst -sha256`
+    let fingerprint = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    Ok((pem, fingerprint))
+}
+
+// ---------------------------------------------------------------------------
+// Load credentials from GOOGLE_APPLICATION_CREDENTIALS
+// ---------------------------------------------------------------------------
+
+fn load_google_application_credentials()
 -> Option<Result<(String, String), Box<dyn std::error::Error>>> {
     let path = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()?;
 
-    println!("[Step 1] GOOGLE_APPLICATION_CREDENTIALS = {path}");
+    println!("GOOGLE_APPLICATION_CREDENTIALS = {path}");
 
     let result = (|| {
         let content =
@@ -107,14 +140,14 @@ fn step1_google_application_credentials()
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 — MAGLEV_PRIVATE_KEY
+// Load or generate credentials from MAGLEV_PRIVATE_KEY
 // ---------------------------------------------------------------------------
 
-fn step2_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Error>> {
+fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Error>> {
     let key_path = env::var("MAGLEV_PRIVATE_KEY")
         .map_err(|_| "MAGLEV_PRIVATE_KEY environment variable is not set")?;
 
-    println!("[Step 2] MAGLEV_PRIVATE_KEY = {key_path}");
+    println!("MAGLEV_PRIVATE_KEY = {key_path}");
 
     let private_key = if Path::new(&key_path).exists() {
         println!("  Key file found — reading...");
@@ -130,7 +163,6 @@ fn step2_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Er
 
         let pem = generate_rsa_private_key_pem()?;
 
-        // Ensure parent directories exist
         if let Some(parent) = Path::new(&key_path).parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)
@@ -145,7 +177,6 @@ fn step2_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Er
         pem
     };
 
-    // Try to get client_email from environment variable, or prompt if not set
     let client_email = env::var("MAGLEV_CLIENT_EMAIL").or_else(|_| {
         println!("  MAGLEV_CLIENT_EMAIL not set.");
         prompt_client_email()
@@ -155,49 +186,55 @@ fn step2_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Er
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — Build in-memory service account JSON
-// ---------------------------------------------------------------------------
-
-fn step3_build_credentials(private_key: String, client_email: String) -> ServiceAccountCredentials {
-    ServiceAccountCredentials {
-        credential_type: "service_account".to_string(),
-        private_key,
-        client_email,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Credential Builder ===\n");
 
-    // ── Step 1 ──────────────────────────────────────────────────────────────
-    let (private_key, client_email) = match step1_google_application_credentials() {
+    let (private_key, client_email) = match load_google_application_credentials() {
         Some(Ok(pair)) => {
             println!("  Using credentials from GOOGLE_APPLICATION_CREDENTIALS.\n");
             pair
         }
-        Some(Err(e)) => {
-            return Err(e);
-        }
+        Some(Err(e)) => return Err(e),
         None => {
             println!("  GOOGLE_APPLICATION_CREDENTIALS not set — falling through.\n");
-
-            // ── Step 2 ──────────────────────────────────────────────────────
-            step2_maglev_private_key()?
+            load_maglev_private_key()?
         }
     };
 
-    // ── Step 3 ──────────────────────────────────────────────────────────────
-    println!("\n[Step 3] Building in-memory service account credentials...");
+    // ── Public key & fingerprint ─────────────────────────────────────────────
 
-    let credentials = step3_build_credentials(private_key, client_email);
-    let json = serde_json::to_string_pretty(&credentials)?;
+    let (public_key_pem, fingerprint) = public_key_info(&private_key)?;
 
-    println!("  Done.\n");
-    println!("{json}");
+    println!("\n── Public key ──────────────────────────────────────────────────────────\n");
+    println!("{public_key_pem}");
+    println!("SHA-256 fingerprint (SPKI/DER):");
+    println!("  {fingerprint}\n");
+    println!("Verify this key is attached to your Google service account:");
+    println!("  • Upload the public key above to your service account, then check that");
+    println!("    the fingerprint shown in IAM & Admin → Service Accounts → Keys");
+    println!("    matches the SHA-256 value printed here.");
+    println!("  • Or confirm via the CLI:");
+    println!("      gcloud iam service-accounts keys list \\");
+    println!("        --iam-account={client_email}");
+    println!("    and cross-check the key ID against the fingerprint.");
+    println!("  • To compute it yourself from the saved public key file:");
+    println!("      openssl pkey -pubin -in pub.pem -outform DER \\");
+    println!("        | openssl dgst -sha256\n");
+
+    // ── Credentials JSON ─────────────────────────────────────────────────────
+
+    println!("── Credentials ─────────────────────────────────────────────────────────\n");
+
+    let credentials = ServiceAccountCredentials {
+        credential_type: "service_account".to_string(),
+        private_key,
+        client_email,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&credentials)?);
 
     Ok(())
 }
