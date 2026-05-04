@@ -323,7 +323,7 @@ fn format_config(
     )
 }
 
-fn run_generate() -> Result<(), Box<dyn std::error::Error>> {
+fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Config Generator ===\n");
 
     // ── Outer block ──────────────────────────────────────────────────────────
@@ -399,7 +399,7 @@ fn run_generate() -> Result<(), Box<dyn std::error::Error>> {
 // Original credential-builder flow (was `main`)
 // ---------------------------------------------------------------------------
 
-fn run_credential_builder() -> Result<(), Box<dyn std::error::Error>> {
+fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Credential Builder ===\n");
 
     let (private_key, client_email) = match load_google_application_credentials() {
@@ -521,19 +521,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
 
     match env::args().nth(1).as_deref() {
-        Some("generate") => run_generate(),
-        Some(unknown) => {
-            eprintln!("error: unknown subcommand '{unknown}'");
-            eprintln!();
+        Some("generate") => generate_config(),
+        Some("print") => print_build_credential(),
+        None | Some(_) => {
             eprintln!("USAGE:");
             eprintln!("    maglev [SUBCOMMAND]");
             eprintln!();
             eprintln!("SUBCOMMANDS:");
             eprintln!("    generate    Interactively generate a .maglev config file");
-            eprintln!("    (none)      Run the credential builder (default)");
+            eprintln!("    print       Run the credential builder (default)");
             std::process::exit(1);
         }
-        None => run_credential_builder(),
     }
 }
 
