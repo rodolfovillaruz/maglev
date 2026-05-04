@@ -1,0 +1,10 @@
+[
+  {
+    "role": "user",
+    "content": "In 100 words\n\nMake a sample HCL object where I can group the following variables:\n\nMAGLEV_CLIENT_EMAIL=my-service-account@my-project.iam.gserviceaccount.com\nMAGLEV_INSTANCE_NAME=maglev-vm\nMAGLEV_MACHINE_TYPE=e2-micro\nMAGLEV_PRIVATE_KEY=.keys/private_key.pem\nMAGLEV_PROJECT_ID=my-project\nMAGLEV_ZONE=us-central1-a\n\nInto another object which is a Kubernetes instance (not HA)."
+  },
+  {
+    "role": "assistant",
+    "content": "# Sample HCL Configuration\n\nHere's an HCL object grouping your Maglev variables into a Kubernetes (non-HA) instance configuration:\n\n```hcl\nkubernetes_instance = {\n  name    = \"k8s-single-node\"\n  ha_mode = false\n\n  maglev = {\n    client_email = \"my-service-account@my-project.iam.gserviceaccount.com\"\n    instance_name = \"maglev-vm\"\n    machine_type = \"e2-micro\"\n    private_key  = \".keys/private_key.pem\"\n    project_id   = \"my-project\"\n    zone         = \"us-central1-a\"\n  }\n}\n```\n\nThis nests the Maglev GCP credentials under a single Kubernetes instance object, keeping configuration clean and reusable."
+  }
+]
