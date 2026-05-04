@@ -19,9 +19,10 @@ struct ServiceAccountCredentials {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Generic prompt helpers
 // ---------------------------------------------------------------------------
 
+/// Ask a yes/no question. Returns `true` only for "y" or "yes".
 fn prompt_yes_no(question: &str) -> bool {
     print!("{question} [y/N]: ");
     io::stdout().flush().expect("Failed to flush stdout");
@@ -35,6 +36,83 @@ fn prompt_yes_no(question: &str) -> bool {
 
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
 }
+
+/// Prompt for a required field. Returns an error if the user submits an empty
+/// string and no default is available.
+///
+/// * `label`    – displayed to the user.
+/// * `env_var`  – if `Some("VAR")`, the current value of that env var is shown
+///                as a default and accepted on empty input.
+fn prompt_field(label: &str, env_var: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    let default = env_var.and_then(|var| env::var(var).ok());
+
+    match &default {
+        Some(val) => {
+            print!("  {label} [{val}]: ");
+            io::stdout()
+                .flush()
+                .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+            let mut line = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .map_err(|e| format!("Failed to read from stdin: {e}"))?;
+
+            let input = line.trim().to_string();
+            Ok(if input.is_empty() { val.clone() } else { input })
+        }
+        None => {
+            print!("  {label}: ");
+            io::stdout()
+                .flush()
+                .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+            let mut line = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .map_err(|e| format!("Failed to read from stdin: {e}"))?;
+
+            let input = line.trim().to_string();
+            if input.is_empty() {
+                Err(format!("'{label}' cannot be empty").into())
+            } else {
+                Ok(input)
+            }
+        }
+    }
+}
+
+/// Like `prompt_field`, but falls back to `hardcoded_default` when neither the
+/// env var nor user input provides a value.
+fn prompt_field_with_default(
+    label: &str,
+    env_var: Option<&str>,
+    hardcoded_default: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let default = env_var
+        .and_then(|var| env::var(var).ok())
+        .unwrap_or_else(|| hardcoded_default.to_string());
+
+    print!("  {label} [{default}]: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+    let mut line = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read from stdin: {e}"))?;
+
+    let input = line.trim().to_string();
+    Ok(if input.is_empty() { default } else { input })
+}
+
+// ---------------------------------------------------------------------------
+// Credential-builder–specific helpers (kept from original)
+// ---------------------------------------------------------------------------
 
 fn prompt_client_email() -> Result<String, Box<dyn std::error::Error>> {
     print!("  Enter client email: ");
@@ -73,13 +151,6 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
     Ok(pem.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Build a self-signed X.509 certificate from the RSA private key.
-//
-// Google Cloud's "Upload public key" expects an RSA_X509_PEM, i.e. a
-// PEM-encoded X.509 certificate (NOT a bare SPKI public key).
-// ---------------------------------------------------------------------------
-
 fn public_key_info(
     private_key_pem: &str,
     client_email: &str,
@@ -88,7 +159,6 @@ fn public_key_info(
     use sha2::{Digest, Sha256};
     use time::{Duration, OffsetDateTime};
 
-    // rcgen detects RSA from the PKCS#8 PEM and signs the cert with it.
     let key_pair = KeyPair::from_pem(private_key_pem)?;
 
     let mut params = CertificateParams::new(Vec::<String>::new())?;
@@ -104,8 +174,6 @@ fn public_key_info(
     let cert_pem = cert.pem();
     let cert_der = cert.der();
 
-    // Google displays the SHA-256 of the certificate DER as the key id
-    // for uploaded user-managed keys. Render it as colon-separated hex.
     let digest = Sha256::digest(cert_der.as_ref());
     let fingerprint = digest
         .iter()
@@ -196,12 +264,142 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 }
 
 // ---------------------------------------------------------------------------
-// Entry point
+// `generate` subcommand
 // ---------------------------------------------------------------------------
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
+/// Render aligned key-value pairs inside a block.
+///
+/// The `=` sign is aligned to one column past the longest key so that the
+/// output matches the style shown in the spec:
+///
+/// ```text
+/// kubernetes_instance = {
+///   name    = "my-k8s-cluster"
+///
+///   maglev = {
+///     client_email  = "…"
+///     instance_name = "…"
+///     …
+///   }
+/// }
+/// ```
+fn format_config(
+    name: &str,
+    client_email: &str,
+    instance_name: &str,
+    machine_type: &str,
+    private_key: &str,
+    project_id: &str,
+    zone: &str,
+) -> String {
+    let maglev_fields: &[(&str, &str)] = &[
+        ("client_email", client_email),
+        ("instance_name", instance_name),
+        ("machine_type", machine_type),
+        ("private_key", private_key),
+        ("project_id", project_id),
+        ("zone", zone),
+    ];
 
+    // Align `=` one space past the longest key in the inner block.
+    let max_key = maglev_fields
+        .iter()
+        .map(|(k, _)| k.len())
+        .max()
+        .unwrap_or(0);
+
+    let maglev_body: String = maglev_fields
+        .iter()
+        .map(|(key, value)| {
+            let pad = " ".repeat(max_key - key.len() + 1);
+            format!("    {key}{pad}= \"{value}\"\n")
+        })
+        .collect();
+
+    // The outer block currently has only `name`; pad it to 8 chars (matching
+    // the spec's `name    =`) so future outer keys can align naturally.
+    format!(
+        "kubernetes_instance = {{\n  name    = \"{name}\"\n\n  maglev = {{\n{maglev_body}  }}\n}}\n"
+    )
+}
+
+fn run_generate() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Maglev Config Generator ===\n");
+
+    // ── Outer block ──────────────────────────────────────────────────────────
+
+    println!("Kubernetes instance settings:");
+    let name = prompt_field("name", None)?;
+
+    // ── Maglev block ─────────────────────────────────────────────────────────
+
+    println!("\nMaglev settings (press Enter to accept the shown default):");
+
+    let client_email = prompt_field("client_email", Some("MAGLEV_CLIENT_EMAIL"))?;
+
+    // Derive a sensible default instance name from the outer `name`.
+    let instance_name_default = format!("maglev-vm-{name}");
+    let instance_name = prompt_field_with_default(
+        "instance_name",
+        Some("MAGLEV_INSTANCE_NAME"),
+        &instance_name_default,
+    )?;
+
+    let machine_type =
+        prompt_field_with_default("machine_type", Some("MAGLEV_MACHINE_TYPE"), "e2-micro")?;
+
+    let private_key = prompt_field_with_default(
+        "private_key",
+        Some("MAGLEV_PRIVATE_KEY"),
+        ".keys/private_key.pem",
+    )?;
+
+    // Derive project ID from `<account>@<project>.iam.gserviceaccount.com`
+    // when MAGLEV_PROJECT_ID is not set.
+    let derived_project = client_email
+        .split('@')
+        .nth(1)
+        .and_then(|domain| domain.split('.').next())
+        .unwrap_or("my-project")
+        .to_string();
+
+    let project_id =
+        prompt_field_with_default("project_id", Some("MAGLEV_PROJECT_ID"), &derived_project)?;
+
+    let zone = prompt_field_with_default("zone", Some("MAGLEV_ZONE"), "us-central1-a")?;
+
+    // ── Render ───────────────────────────────────────────────────────────────
+
+    let config = format_config(
+        &name,
+        &client_email,
+        &instance_name,
+        &machine_type,
+        &private_key,
+        &project_id,
+        &zone,
+    );
+
+    println!("\n── Generated config ────────────────────────────────────────────────────\n");
+    println!("{config}");
+
+    // ── Optionally save ──────────────────────────────────────────────────────
+
+    if prompt_yes_no("Save config to file?") {
+        let filename = format!("{name}.maglev");
+        fs::write(&filename, &config)
+            .map_err(|e| format!("Cannot write config to '{filename}': {e}"))?;
+        println!("✓ Config saved to: {filename}");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Original credential-builder flow (was `main`)
+// ---------------------------------------------------------------------------
+
+fn run_credential_builder() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Credential Builder ===\n");
 
     let (private_key, client_email) = match load_google_application_credentials() {
@@ -244,7 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let json_str = serde_json::to_string_pretty(&credentials)?;
     println!("{json_str}");
 
-    // ── Save credentials ────────────────────────────────────────────────────
+    // ── Save credentials ─────────────────────────────────────────────────────
 
     if prompt_yes_no("\nSave credentials to file?") {
         let filename = format!(
@@ -259,11 +457,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("⚠ Keep this file secure!");
     }
 
-    // ── Create a VM instance ────────────────────────────────────────────────
+    // ── Create a VM instance ─────────────────────────────────────────────────
 
     if prompt_yes_no("\nCreate a VM instance now?") {
-        // Project ID: explicit env var, or derived from
-        // "<sa>@<PROJECT_ID>.iam.gserviceaccount.com".
         let project_id = if let Ok(p) = env::var("MAGLEV_PROJECT_ID") {
             p
         } else {
@@ -318,7 +514,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// JWT (RS256) — signed directly with the RSA PEM, no JSON credentials needed.
+// Entry point — subcommand dispatch
+// ---------------------------------------------------------------------------
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
+
+    match env::args().nth(1).as_deref() {
+        Some("generate") => run_generate(),
+        Some(unknown) => {
+            eprintln!("error: unknown subcommand '{unknown}'");
+            eprintln!();
+            eprintln!("USAGE:");
+            eprintln!("    maglev [SUBCOMMAND]");
+            eprintln!();
+            eprintln!("SUBCOMMANDS:");
+            eprintln!("    generate    Interactively generate a .maglev config file");
+            eprintln!("    (none)      Run the credential builder (default)");
+            std::process::exit(1);
+        }
+        None => run_credential_builder(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JWT (RS256)
 // ---------------------------------------------------------------------------
 
 fn b64url(input: &[u8]) -> String {
@@ -334,7 +554,6 @@ fn create_jwt(
     use rsa::{RsaPrivateKey, pkcs1v15::Pkcs1v15Sign, pkcs8::DecodePrivateKey};
     use sha2::{Digest, Sha256};
 
-    // Parse the PEM directly — this is the "native PEM" path.
     let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)?;
 
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -353,9 +572,6 @@ fn create_jwt(
     );
     let hash = Sha256::digest(signing_input.as_bytes());
 
-    // PKCS#1 v1.5 DigestInfo prefix for SHA-256.
-    // We use `new_unprefixed` and prepend the prefix manually to avoid
-    // tying the rsa crate to a specific sha2 version via type parameters.
     const SHA256_DIGEST_INFO: [u8; 19] = [
         0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
         0x05, 0x00, 0x04, 0x20,
