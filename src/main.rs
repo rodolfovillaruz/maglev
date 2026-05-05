@@ -36,71 +36,6 @@ fn prompt_yes_no(question: &str) -> bool {
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-fn prompt_field(label: &str, env_var: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
-    let default = env_var.and_then(|var| env::var(var).ok());
-
-    match &default {
-        Some(val) => {
-            print!("  {label} [{val}]: ");
-            io::stdout()
-                .flush()
-                .map_err(|e| format!("Failed to flush stdout: {e}"))?;
-
-            let mut line = String::new();
-            io::stdin()
-                .lock()
-                .read_line(&mut line)
-                .map_err(|e| format!("Failed to read from stdin: {e}"))?;
-
-            let input = line.trim().to_string();
-            Ok(if input.is_empty() { val.clone() } else { input })
-        }
-        None => {
-            print!("  {label}: ");
-            io::stdout()
-                .flush()
-                .map_err(|e| format!("Failed to flush stdout: {e}"))?;
-
-            let mut line = String::new();
-            io::stdin()
-                .lock()
-                .read_line(&mut line)
-                .map_err(|e| format!("Failed to read from stdin: {e}"))?;
-
-            let input = line.trim().to_string();
-            if input.is_empty() {
-                Err(format!("'{label}' cannot be empty").into())
-            } else {
-                Ok(input)
-            }
-        }
-    }
-}
-
-fn prompt_field_with_default(
-    label: &str,
-    env_var: Option<&str>,
-    hardcoded_default: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let default = env_var
-        .and_then(|var| env::var(var).ok())
-        .unwrap_or_else(|| hardcoded_default.to_string());
-
-    print!("  {label} [{default}]: ");
-    io::stdout()
-        .flush()
-        .map_err(|e| format!("Failed to flush stdout: {e}"))?;
-
-    let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| format!("Failed to read from stdin: {e}"))?;
-
-    let input = line.trim().to_string();
-    Ok(if input.is_empty() { default } else { input })
-}
-
 // ---------------------------------------------------------------------------
 // Credential-builder–specific helpers
 // ---------------------------------------------------------------------------
@@ -361,20 +296,23 @@ fn format_config(
     )
 }
 
-fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Maglev Config Generator ===\n");
+fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if Path::new(config_path).exists() {
+        eprintln!("error: '{config_path}' already exists");
+        std::process::exit(1);
+    }
 
-    // ── Outer block ──────────────────────────────────────────────────────────
+    // Derive the logical name from the file stem (e.g. "prod" from "prod.maglev").
+    let name = Path::new(config_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("maglev")
+        .to_string();
 
-    println!("Kubernetes instance settings:");
-    let name = prompt_field("name", None)?;
+    // ── All values come from env vars; MAGLEV_CLIENT_EMAIL is required ───────
 
-    // ── Maglev block ─────────────────────────────────────────────────────────
-
-    println!("\nMaglev settings (press Enter to accept the shown default):\n");
-    println!("  -- Authentication --");
-
-    let client_email = prompt_field("client_email", Some("MAGLEV_CLIENT_EMAIL"))?;
+    let client_email = env::var("MAGLEV_CLIENT_EMAIL")
+        .map_err(|_| "MAGLEV_CLIENT_EMAIL environment variable is not set")?;
 
     let derived_project = client_email
         .split('@')
@@ -383,55 +321,31 @@ fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or("my-project")
         .to_string();
 
-    let project_id =
-        prompt_field_with_default("project_id", Some("MAGLEV_PROJECT_ID"), &derived_project)?;
+    let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
 
-    let private_key = prompt_field_with_default(
-        "private_key",
-        Some("MAGLEV_PRIVATE_KEY"),
-        ".keys/private_key.pem",
-    )?;
+    let private_key =
+        env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| ".keys/private_key.pem".to_string());
 
-    println!("\n  -- Instance --");
+    let instance_name =
+        env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-vm-{name}"));
 
-    let instance_name_default = format!("maglev-vm-{name}");
-    let instance_name = prompt_field_with_default(
-        "instance_name",
-        Some("MAGLEV_INSTANCE_NAME"),
-        &instance_name_default,
-    )?;
+    let machine_type = env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
 
-    let machine_type =
-        prompt_field_with_default("machine_type", Some("MAGLEV_MACHINE_TYPE"), "e2-medium")?;
+    let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
 
-    let zone = prompt_field_with_default("zone", Some("MAGLEV_ZONE"), "europe-north1-a")?;
-
-    println!("\n  -- Boot disk --");
-
-    let boot_disk_image = prompt_field_with_default(
-        "boot_disk_image",
-        Some("MAGLEV_BOOT_DISK_IMAGE"),
-        "ubuntu-2404-lts-amd64",
-    )?;
+    let boot_disk_image =
+        env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
 
     let boot_disk_size_gb =
-        prompt_field_with_default("boot_disk_size_gb", Some("MAGLEV_BOOT_DISK_SIZE_GB"), "50")?;
+        env::var("MAGLEV_BOOT_DISK_SIZE_GB").unwrap_or_else(|_| "50".to_string());
 
-    println!("\n  -- Access --");
+    let ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
+        .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
 
-    let ssh_public_key_path = prompt_field_with_default(
-        "ssh_public_key_path",
-        Some("MAGLEV_SSH_PUBLIC_KEY_PATH"),
-        "~/.ssh/id_ed25519.pub",
-    )?;
+    let startup_script_path =
+        env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
 
-    let startup_script_path = prompt_field_with_default(
-        "startup_script_path",
-        Some("MAGLEV_STARTUP_SCRIPT_PATH"),
-        "./startup.sh",
-    )?;
-
-    // ── Render ───────────────────────────────────────────────────────────────
+    // ── Render & write ────────────────────────────────────────────────────────
 
     let config = format_config(
         &name,
@@ -447,17 +361,10 @@ fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
         &zone,
     );
 
-    println!("\n── Generated config ────────────────────────────────────────────────────\n");
-    println!("{config}");
+    fs::write(config_path, &config)
+        .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
 
-    // ── Optionally save ──────────────────────────────────────────────────────
-
-    if prompt_yes_no("Save config to file?") {
-        let filename = format!("{name}.maglev");
-        fs::write(&filename, &config)
-            .map_err(|e| format!("Cannot write config to '{filename}': {e}"))?;
-        println!("✓ Config saved to: {filename}");
-    }
+    println!("✓ Config written to: {config_path}");
 
     Ok(())
 }
@@ -556,9 +463,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         let startup_script_path =
             env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
 
-        // Read SSH public key — the value stored in the instance metadata must
-        // be in the form  `<linux-user>:<key-material>` so that the GCP guest
-        // agent injects it correctly.
         let ssh_key_content = read_ssh_public_key(&ssh_key_path).unwrap_or_else(|e| {
             eprintln!("  ⚠ Could not read SSH public key: {e}");
             String::new()
@@ -619,7 +523,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
 
     match env::args().nth(1).as_deref() {
-        Some("generate") => generate_config(),
+        Some("generate") => match env::args().nth(2) {
+            Some(path) => generate_config(&path),
+            None => {
+                eprintln!("error: 'generate' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev generate <config.maglev>");
+                std::process::exit(1);
+            }
+        },
 
         Some("apply") => match env::args().nth(2) {
             Some(path) => apply_config(&path),
@@ -639,7 +552,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("    maglev [SUBCOMMAND]");
             eprintln!();
             eprintln!("SUBCOMMANDS:");
-            eprintln!("    generate             Interactively generate a .maglev config file");
+            eprintln!("    generate <config>    Generate a .maglev config file from env vars");
             eprintln!("    apply <config>       Create a VM from a .maglev config file");
             eprintln!("    print                Run the credential builder");
             std::process::exit(1);
@@ -730,7 +643,6 @@ fn create_vm(
     machine_type: &str,
     boot_disk_image: &str,
     boot_disk_size_gb: u64,
-    // "ubuntu:<ssh-public-key-material>" — empty string skips the metadata key
     ssh_keys_metadata: &str,
     startup_script: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
@@ -738,9 +650,6 @@ fn create_vm(
         "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances"
     );
 
-    // Build the metadata items list dynamically so we only include non-empty
-    // entries — an empty ssh-keys value would cause the API to reject the
-    // request.
     let mut metadata_items: Vec<Value> = Vec::new();
 
     if !ssh_keys_metadata.is_empty() {
@@ -805,10 +714,6 @@ fn create_vm(
 // .maglev config parser
 // ---------------------------------------------------------------------------
 
-/// Parse every  `key = "value"`  line from a .maglev file into a flat map.
-///
-/// Lines that end with `{`, lines that are bare `}`, and blank lines are
-/// intentionally skipped — they are structural and carry no values.
 fn parse_maglev_config(
     content: &str,
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
@@ -817,12 +722,10 @@ fn parse_maglev_config(
     for raw_line in content.lines() {
         let line = raw_line.trim();
 
-        // Skip blank lines, closing braces, and block-opening lines.
         if line.is_empty() || line == "}" || line.ends_with('{') {
             continue;
         }
 
-        // Match:  <key> = "<value>"
         let Some(eq_pos) = line.find('=') else {
             continue;
         };
@@ -852,15 +755,12 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = parse_maglev_config(&content)?;
 
-    // Helper that turns a missing key into a descriptive error.
     let require = |key: &str| -> Result<String, Box<dyn std::error::Error>> {
         config
             .get(key)
             .cloned()
             .ok_or_else(|| format!("Missing required field '{key}' in {config_path}").into())
     };
-
-    // ── Pull every field out of the parsed map ────────────────────────────
 
     let client_email = require("client_email")?;
     let instance_name = require("instance_name")?;
@@ -876,13 +776,9 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|_| "Field 'boot_disk_size_gb' must be a positive integer")?;
 
-    // ── Load the private key from the path stored in the config ───────────
-
     let expanded_key_path = expand_tilde(&private_key_path);
     let private_key = fs::read_to_string(&expanded_key_path)
         .map_err(|e| format!("Cannot read private key from '{expanded_key_path}': {e}"))?;
-
-    // ── SSH public key ────────────────────────────────────────────────────
 
     let ssh_key_content = read_ssh_public_key(&ssh_public_key_path).unwrap_or_else(|e| {
         eprintln!("  ⚠ Could not read SSH public key: {e}");
@@ -895,11 +791,7 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         format!("ubuntu:{ssh_key_content}")
     };
 
-    // ── Startup script ────────────────────────────────────────────────────
-
     let startup_script = read_startup_script(&startup_script_path);
-
-    // ── Summary & confirmation ────────────────────────────────────────────
 
     println!("\n── Instance details ────────────────────────────────────────────────────");
     println!("  Project:           {project_id}");
@@ -916,8 +808,6 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("Aborted.");
         return Ok(());
     }
-
-    // ── Authenticate & call the API ───────────────────────────────────────
 
     println!("\n  Signing JWT with RSA-SHA256...");
     let jwt = create_jwt(
