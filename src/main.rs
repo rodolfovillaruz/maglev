@@ -22,7 +22,6 @@ struct ServiceAccountCredentials {
 // Generic prompt helpers
 // ---------------------------------------------------------------------------
 
-/// Ask a yes/no question. Returns `true` only for "y" or "yes".
 fn prompt_yes_no(question: &str) -> bool {
     print!("{question} [y/N]: ");
     io::stdout().flush().expect("Failed to flush stdout");
@@ -37,12 +36,6 @@ fn prompt_yes_no(question: &str) -> bool {
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-/// Prompt for a required field. Returns an error if the user submits an empty
-/// string and no default is available.
-///
-/// * `label`    – displayed to the user.
-/// * `env_var`  – if `Some("VAR")`, the current value of that env var is shown
-///                as a default and accepted on empty input.
 fn prompt_field(label: &str, env_var: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
     let default = env_var.and_then(|var| env::var(var).ok());
 
@@ -84,8 +77,6 @@ fn prompt_field(label: &str, env_var: Option<&str>) -> Result<String, Box<dyn st
     }
 }
 
-/// Like `prompt_field`, but falls back to `hardcoded_default` when neither the
-/// env var nor user input provides a value.
 fn prompt_field_with_default(
     label: &str,
     env_var: Option<&str>,
@@ -111,7 +102,7 @@ fn prompt_field_with_default(
 }
 
 // ---------------------------------------------------------------------------
-// Credential-builder–specific helpers (kept from original)
+// Credential-builder–specific helpers
 // ---------------------------------------------------------------------------
 
 fn prompt_client_email() -> Result<String, Box<dyn std::error::Error>> {
@@ -185,6 +176,63 @@ fn public_key_info(
 }
 
 // ---------------------------------------------------------------------------
+// SSH key / startup-script helpers
+// ---------------------------------------------------------------------------
+
+/// Read the public key at `path`, expanding a leading `~` to `$HOME`.
+fn read_ssh_public_key(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let expanded = expand_tilde(path);
+    let content = fs::read_to_string(&expanded)
+        .map_err(|e| format!("Cannot read SSH public key from '{expanded}': {e}"))?;
+    Ok(content.trim().to_string())
+}
+
+/// Read the startup script at `path`; fall back to a sensible built-in default
+/// when the file does not exist.
+fn read_startup_script(path: &str) -> String {
+    let expanded = expand_tilde(path);
+    fs::read_to_string(&expanded)
+        .unwrap_or_else(|_| "#!/bin/bash\nset -e\napt-get update\n".to_string())
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        path.replacen('~', &home, 1)
+    } else {
+        path.to_string()
+    }
+}
+
+/// Map a bare image family name to the full GCP image URI used by the API.
+///
+/// | Input                    | Resolved                                                             |
+/// |--------------------------|----------------------------------------------------------------------|
+/// | `ubuntu-2404-lts-amd64`  | `projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64` |
+/// | `debian-12`              | `projects/debian-cloud/global/images/family/debian-12`               |
+/// | `cos-stable`             | `projects/cos-cloud/global/images/family/cos-stable`                 |
+/// | anything containing `/`  | returned as-is (already a full path)                                 |
+fn resolve_image(image: &str) -> String {
+    if image.contains('/') {
+        return image.to_string();
+    }
+    let project = if image.starts_with("ubuntu") {
+        "ubuntu-os-cloud"
+    } else if image.starts_with("debian") {
+        "debian-cloud"
+    } else if image.starts_with("cos") {
+        "cos-cloud"
+    } else if image.starts_with("rhel") {
+        "rhel-cloud"
+    } else if image.starts_with("rocky") {
+        "rocky-linux-cloud"
+    } else {
+        "debian-cloud"
+    };
+    format!("projects/{project}/global/images/family/{image}")
+}
+
+// ---------------------------------------------------------------------------
 // Load credentials from GOOGLE_APPLICATION_CREDENTIALS
 // ---------------------------------------------------------------------------
 
@@ -229,7 +277,6 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 
     let private_key = if Path::new(&key_path).exists() {
         println!("  Key file found — reading...");
-
         fs::read_to_string(&key_path).map_err(|e| format!("Cannot read '{key_path}': {e}"))?
     } else {
         println!("  Key file does not exist at: {key_path}");
@@ -267,41 +314,34 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 // `generate` subcommand
 // ---------------------------------------------------------------------------
 
-/// Render aligned key-value pairs inside a block.
-///
-/// The `=` sign is aligned to one column past the longest key so that the
-/// output matches the style shown in the spec:
-///
-/// ```text
-/// kubernetes_instance = {
-///   name    = "my-k8s-cluster"
-///
-///   maglev = {
-///     client_email  = "…"
-///     instance_name = "…"
-///     …
-///   }
-/// }
-/// ```
+#[allow(clippy::too_many_arguments)]
 fn format_config(
     name: &str,
+    boot_disk_image: &str,
+    boot_disk_size_gb: &str,
     client_email: &str,
     instance_name: &str,
     machine_type: &str,
     private_key: &str,
     project_id: &str,
+    ssh_public_key_path: &str,
+    startup_script_path: &str,
     zone: &str,
 ) -> String {
+    // Fields are listed alphabetically so the output is deterministic.
     let maglev_fields: &[(&str, &str)] = &[
+        ("boot_disk_image", boot_disk_image),
+        ("boot_disk_size_gb", boot_disk_size_gb),
         ("client_email", client_email),
         ("instance_name", instance_name),
         ("machine_type", machine_type),
         ("private_key", private_key),
         ("project_id", project_id),
+        ("ssh_public_key_path", ssh_public_key_path),
+        ("startup_script_path", startup_script_path),
         ("zone", zone),
     ];
 
-    // Align `=` one space past the longest key in the inner block.
     let max_key = maglev_fields
         .iter()
         .map(|(k, _)| k.len())
@@ -316,8 +356,6 @@ fn format_config(
         })
         .collect();
 
-    // The outer block currently has only `name`; pad it to 8 chars (matching
-    // the spec's `name    =`) so future outer keys can align naturally.
     format!(
         "kubernetes_instance = {{\n  name    = \"{name}\"\n\n  maglev = {{\n{maglev_body}  }}\n}}\n"
     )
@@ -333,29 +371,11 @@ fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Maglev block ─────────────────────────────────────────────────────────
 
-    println!("\nMaglev settings (press Enter to accept the shown default):");
+    println!("\nMaglev settings (press Enter to accept the shown default):\n");
+    println!("  -- Authentication --");
 
     let client_email = prompt_field("client_email", Some("MAGLEV_CLIENT_EMAIL"))?;
 
-    // Derive a sensible default instance name from the outer `name`.
-    let instance_name_default = format!("maglev-vm-{name}");
-    let instance_name = prompt_field_with_default(
-        "instance_name",
-        Some("MAGLEV_INSTANCE_NAME"),
-        &instance_name_default,
-    )?;
-
-    let machine_type =
-        prompt_field_with_default("machine_type", Some("MAGLEV_MACHINE_TYPE"), "e2-micro")?;
-
-    let private_key = prompt_field_with_default(
-        "private_key",
-        Some("MAGLEV_PRIVATE_KEY"),
-        ".keys/private_key.pem",
-    )?;
-
-    // Derive project ID from `<account>@<project>.iam.gserviceaccount.com`
-    // when MAGLEV_PROJECT_ID is not set.
     let derived_project = client_email
         .split('@')
         .nth(1)
@@ -366,17 +386,64 @@ fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
     let project_id =
         prompt_field_with_default("project_id", Some("MAGLEV_PROJECT_ID"), &derived_project)?;
 
-    let zone = prompt_field_with_default("zone", Some("MAGLEV_ZONE"), "us-central1-a")?;
+    let private_key = prompt_field_with_default(
+        "private_key",
+        Some("MAGLEV_PRIVATE_KEY"),
+        ".keys/private_key.pem",
+    )?;
+
+    println!("\n  -- Instance --");
+
+    let instance_name_default = format!("maglev-vm-{name}");
+    let instance_name = prompt_field_with_default(
+        "instance_name",
+        Some("MAGLEV_INSTANCE_NAME"),
+        &instance_name_default,
+    )?;
+
+    let machine_type =
+        prompt_field_with_default("machine_type", Some("MAGLEV_MACHINE_TYPE"), "e2-medium")?;
+
+    let zone = prompt_field_with_default("zone", Some("MAGLEV_ZONE"), "europe-north1-a")?;
+
+    println!("\n  -- Boot disk --");
+
+    let boot_disk_image = prompt_field_with_default(
+        "boot_disk_image",
+        Some("MAGLEV_BOOT_DISK_IMAGE"),
+        "ubuntu-2404-lts-amd64",
+    )?;
+
+    let boot_disk_size_gb =
+        prompt_field_with_default("boot_disk_size_gb", Some("MAGLEV_BOOT_DISK_SIZE_GB"), "50")?;
+
+    println!("\n  -- Access --");
+
+    let ssh_public_key_path = prompt_field_with_default(
+        "ssh_public_key_path",
+        Some("MAGLEV_SSH_PUBLIC_KEY_PATH"),
+        "~/.ssh/id_ed25519.pub",
+    )?;
+
+    let startup_script_path = prompt_field_with_default(
+        "startup_script_path",
+        Some("MAGLEV_STARTUP_SCRIPT_PATH"),
+        "./startup.sh",
+    )?;
 
     // ── Render ───────────────────────────────────────────────────────────────
 
     let config = format_config(
         &name,
+        &boot_disk_image,
+        &boot_disk_size_gb,
         &client_email,
         &instance_name,
         &machine_type,
         &private_key,
         &project_id,
+        &ssh_public_key_path,
+        &startup_script_path,
         &zone,
     );
 
@@ -396,7 +463,7 @@ fn generate_config() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// Original credential-builder flow (was `main`)
+// Original credential-builder flow
 // ---------------------------------------------------------------------------
 
 fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
@@ -449,10 +516,8 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
             "maglev-credentials-{}.json",
             client_email.split('@').next().unwrap_or("account")
         );
-
-        let json_str = serde_json::to_string_pretty(&credentials)?;
-        fs::write(&filename, json_str).map_err(|e| format!("Cannot write credentials: {e}"))?;
-
+        fs::write(&filename, serde_json::to_string_pretty(&credentials)?)
+            .map_err(|e| format!("Cannot write credentials: {e}"))?;
         println!("✓ Credentials saved to: {filename}");
         println!("⚠ Keep this file secure!");
     }
@@ -471,21 +536,50 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("Cannot derive project ID from client_email; set MAGLEV_PROJECT_ID")?
         };
 
-        let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "us-central1-a".to_string());
+        let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
         let machine_type =
-            env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-micro".to_string());
+            env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
         let instance_name = env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| {
             format!(
                 "maglev-vm-{}",
                 time::OffsetDateTime::now_utc().unix_timestamp()
             )
         });
+        let boot_disk_image = env::var("MAGLEV_BOOT_DISK_IMAGE")
+            .unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
+        let boot_disk_size_gb: u64 = env::var("MAGLEV_BOOT_DISK_SIZE_GB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
+        let ssh_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
+            .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
+        let startup_script_path =
+            env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
+
+        // Read SSH public key — the value stored in the instance metadata must
+        // be in the form  `<linux-user>:<key-material>` so that the GCP guest
+        // agent injects it correctly.
+        let ssh_key_content = read_ssh_public_key(&ssh_key_path).unwrap_or_else(|e| {
+            eprintln!("  ⚠ Could not read SSH public key: {e}");
+            String::new()
+        });
+        let ssh_keys_metadata = if ssh_key_content.is_empty() {
+            String::new()
+        } else {
+            format!("ubuntu:{ssh_key_content}")
+        };
+
+        let startup_script = read_startup_script(&startup_script_path);
 
         println!("\n── Creating VM instance ────────────────────────────────────────────────");
-        println!("  Project:      {project_id}");
-        println!("  Zone:         {zone}");
-        println!("  Machine type: {machine_type}");
-        println!("  Name:         {instance_name}");
+        println!("  Project:           {project_id}");
+        println!("  Zone:              {zone}");
+        println!("  Machine type:      {machine_type}");
+        println!("  Name:              {instance_name}");
+        println!("  Boot disk image:   {boot_disk_image}");
+        println!("  Boot disk size:    {boot_disk_size_gb} GB");
+        println!("  SSH key path:      {ssh_key_path}");
+        println!("  Startup script:    {startup_script_path}");
 
         println!("  Signing JWT with RSA-SHA256 (PEM-native)...");
         let jwt = create_jwt(
@@ -504,6 +598,10 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
             &zone,
             &instance_name,
             &machine_type,
+            &boot_disk_image,
+            boot_disk_size_gb,
+            &ssh_keys_metadata,
+            &startup_script,
         )?;
 
         println!("\n✓ VM creation requested. Operation response:\n");
@@ -529,7 +627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!();
             eprintln!("SUBCOMMANDS:");
             eprintln!("    generate    Interactively generate a .maglev config file");
-            eprintln!("    print       Run the credential builder (default)");
+            eprintln!("    print       Run the credential builder");
             std::process::exit(1);
         }
     }
@@ -609,16 +707,41 @@ fn get_access_token(jwt: &str) -> Result<String, Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("No access_token in response: {body}").into())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_vm(
     access_token: &str,
     project_id: &str,
     zone: &str,
     instance_name: &str,
     machine_type: &str,
+    boot_disk_image: &str,
+    boot_disk_size_gb: u64,
+    // "ubuntu:<ssh-public-key-material>" — empty string skips the metadata key
+    ssh_keys_metadata: &str,
+    startup_script: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let url = format!(
         "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances"
     );
+
+    // Build the metadata items list dynamically so we only include non-empty
+    // entries — an empty ssh-keys value would cause the API to reject the
+    // request.
+    let mut metadata_items: Vec<Value> = Vec::new();
+
+    if !ssh_keys_metadata.is_empty() {
+        metadata_items.push(serde_json::json!({
+            "key":   "ssh-keys",
+            "value": ssh_keys_metadata,
+        }));
+    }
+
+    if !startup_script.is_empty() {
+        metadata_items.push(serde_json::json!({
+            "key":   "startup-script",
+            "value": startup_script,
+        }));
+    }
 
     let request_body = serde_json::json!({
         "name": instance_name,
@@ -627,16 +750,20 @@ fn create_vm(
             "boot": true,
             "autoDelete": true,
             "initializeParams": {
-                "sourceImage": "projects/debian-cloud/global/images/family/debian-12"
+                "sourceImage": resolve_image(boot_disk_image),
+                "diskSizeGb": boot_disk_size_gb.to_string(),
             }
         }],
         "networkInterfaces": [{
             "network": "global/networks/default",
             "accessConfigs": [{
                 "type": "ONE_TO_ONE_NAT",
-                "name": "External NAT"
+                "name": "External NAT",
             }]
-        }]
+        }],
+        "metadata": {
+            "items": metadata_items,
+        }
     });
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
