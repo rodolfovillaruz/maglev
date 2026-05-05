@@ -620,14 +620,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match env::args().nth(1).as_deref() {
         Some("generate") => generate_config(),
+
+        Some("apply") => match env::args().nth(2) {
+            Some(path) => apply_config(&path),
+            None => {
+                eprintln!("error: 'apply' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev apply <config.maglev>");
+                std::process::exit(1);
+            }
+        },
+
         Some("print") => print_build_credential(),
+
         None | Some(_) => {
             eprintln!("USAGE:");
             eprintln!("    maglev [SUBCOMMAND]");
             eprintln!();
             eprintln!("SUBCOMMANDS:");
-            eprintln!("    generate    Interactively generate a .maglev config file");
-            eprintln!("    print       Run the credential builder");
+            eprintln!("    generate             Interactively generate a .maglev config file");
+            eprintln!("    apply <config>       Create a VM from a .maglev config file");
+            eprintln!("    print                Run the credential builder");
             std::process::exit(1);
         }
     }
@@ -785,4 +799,151 @@ fn create_vm(
     }
 
     Ok(body)
+}
+
+// ---------------------------------------------------------------------------
+// .maglev config parser
+// ---------------------------------------------------------------------------
+
+/// Parse every  `key = "value"`  line from a .maglev file into a flat map.
+///
+/// Lines that end with `{`, lines that are bare `}`, and blank lines are
+/// intentionally skipped — they are structural and carry no values.
+fn parse_maglev_config(
+    content: &str,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    let mut map = std::collections::HashMap::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+
+        // Skip blank lines, closing braces, and block-opening lines.
+        if line.is_empty() || line == "}" || line.ends_with('{') {
+            continue;
+        }
+
+        // Match:  <key> = "<value>"
+        let Some(eq_pos) = line.find('=') else {
+            continue;
+        };
+
+        let key = line[..eq_pos].trim().to_string();
+        let value_part = line[eq_pos + 1..].trim();
+
+        if value_part.starts_with('"') && value_part.ends_with('"') && value_part.len() >= 2 {
+            let value = value_part[1..value_part.len() - 1].to_string();
+            map.insert(key, value);
+        }
+    }
+
+    Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// `apply` subcommand
+// ---------------------------------------------------------------------------
+
+fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Maglev Apply ===\n");
+    println!("Reading config: {config_path}");
+
+    let content = fs::read_to_string(config_path)
+        .map_err(|e| format!("Cannot read config file '{config_path}': {e}"))?;
+
+    let config = parse_maglev_config(&content)?;
+
+    // Helper that turns a missing key into a descriptive error.
+    let require = |key: &str| -> Result<String, Box<dyn std::error::Error>> {
+        config
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("Missing required field '{key}' in {config_path}").into())
+    };
+
+    // ── Pull every field out of the parsed map ────────────────────────────
+
+    let client_email = require("client_email")?;
+    let instance_name = require("instance_name")?;
+    let machine_type = require("machine_type")?;
+    let project_id = require("project_id")?;
+    let zone = require("zone")?;
+    let boot_disk_image = require("boot_disk_image")?;
+    let private_key_path = require("private_key")?;
+    let ssh_public_key_path = require("ssh_public_key_path")?;
+    let startup_script_path = require("startup_script_path")?;
+
+    let boot_disk_size_gb: u64 = require("boot_disk_size_gb")?
+        .parse()
+        .map_err(|_| "Field 'boot_disk_size_gb' must be a positive integer")?;
+
+    // ── Load the private key from the path stored in the config ───────────
+
+    let expanded_key_path = expand_tilde(&private_key_path);
+    let private_key = fs::read_to_string(&expanded_key_path)
+        .map_err(|e| format!("Cannot read private key from '{expanded_key_path}': {e}"))?;
+
+    // ── SSH public key ────────────────────────────────────────────────────
+
+    let ssh_key_content = read_ssh_public_key(&ssh_public_key_path).unwrap_or_else(|e| {
+        eprintln!("  ⚠ Could not read SSH public key: {e}");
+        String::new()
+    });
+
+    let ssh_keys_metadata = if ssh_key_content.is_empty() {
+        String::new()
+    } else {
+        format!("ubuntu:{ssh_key_content}")
+    };
+
+    // ── Startup script ────────────────────────────────────────────────────
+
+    let startup_script = read_startup_script(&startup_script_path);
+
+    // ── Summary & confirmation ────────────────────────────────────────────
+
+    println!("\n── Instance details ────────────────────────────────────────────────────");
+    println!("  Project:           {project_id}");
+    println!("  Zone:              {zone}");
+    println!("  Machine type:      {machine_type}");
+    println!("  Name:              {instance_name}");
+    println!("  Boot disk image:   {boot_disk_image}");
+    println!("  Boot disk size:    {boot_disk_size_gb} GB");
+    println!("  SSH key path:      {ssh_public_key_path}");
+    println!("  Startup script:    {startup_script_path}");
+    println!("  Service account:   {client_email}");
+
+    if !prompt_yes_no("\nProceed with creating the VM instance?") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    // ── Authenticate & call the API ───────────────────────────────────────
+
+    println!("\n  Signing JWT with RSA-SHA256...");
+    let jwt = create_jwt(
+        &private_key,
+        &client_email,
+        "https://www.googleapis.com/auth/compute",
+    )?;
+
+    println!("  Exchanging JWT for OAuth2 access token...");
+    let access_token = get_access_token(&jwt)?;
+
+    println!("  Calling Compute Engine API...");
+    let response = create_vm(
+        &access_token,
+        &project_id,
+        &zone,
+        &instance_name,
+        &machine_type,
+        &boot_disk_image,
+        boot_disk_size_gb,
+        &ssh_keys_metadata,
+        &startup_script,
+    )?;
+
+    println!("\n✓ VM creation requested. Operation response:\n");
+    println!("{}", serde_json::to_string_pretty(&response)?);
+
+    Ok(())
 }
