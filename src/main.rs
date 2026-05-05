@@ -127,7 +127,7 @@ fn read_ssh_public_key(path: &str) -> Result<String, Box<dyn std::error::Error>>
 fn read_startup_script(path: &str) -> String {
     let expanded = expand_tilde(path);
     fs::read_to_string(&expanded)
-        .unwrap_or_else(|_| "#!/bin/bash\nset -e\napt-get update\n".to_string())
+        .unwrap_or_else(|_| "#!/bin/bash\nset -e\napt-get update\ncurl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.6/cisak-v0.1.6-linux-amd64.tar.gz | tar -xz\ninstall -m 755 -o root -g root cisak /usr/local/bin/cisak\ncisak generate\ncisak run -y\nservice containerd start\nkubeadm config images pull\nkubeadm init\ncilium --kubeconfig /etc/kubernetes/admin.conf install\ncilium --kubeconfig /etc/kubernetes/admin.conf status --wait".to_string())
 }
 
 fn expand_tilde(path: &str) -> String {
