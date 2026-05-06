@@ -131,12 +131,32 @@ fn read_startup_script(path: &str) -> String {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
-        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        path.replacen('~', &home, 1)
+    // Strip the leading `~` only when followed by a separator or end-of-string
+    let after_tilde = if path == "~" {
+        ""
+    } else if path.starts_with("~/") || path.starts_with("~\\") {
+        &path[1..] // keep the separator so joining is clean
     } else {
-        path.to_string()
-    }
+        return path.to_string();
+    };
+
+    let home = home_dir().unwrap_or_else(|| ".".to_string());
+    format!("{}{}", home, after_tilde)
+}
+
+/// Cross-platform home directory lookup.
+fn home_dir() -> Option<String> {
+    // Unix: $HOME
+    // Windows: %USERPROFILE%, then %HOMEDRIVE%%HOMEPATH%
+    env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .ok()
+        .or_else(|| {
+            // Last-resort Windows fallback
+            let drive = env::var("HOMEDRIVE").ok()?;
+            let path = env::var("HOMEPATH").ok()?;
+            Some(format!("{}{}", drive, path))
+        })
 }
 
 /// Map a bare image family name to the full GCP image URI used by the API.
