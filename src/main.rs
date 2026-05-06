@@ -491,6 +491,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
 
+        // ── NEW ──────────────────────────────────────────────────────────────
+        Some("destroy") => match env::args().nth(2) {
+            Some(path) => destroy_config(&path),
+            None => {
+                eprintln!("error: 'destroy' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev destroy <config.maglev>");
+                std::process::exit(1);
+            }
+        },
+
         Some("print") => print_build_credential(),
 
         None | Some(_) => {
@@ -500,6 +512,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("SUBCOMMANDS:");
             eprintln!("    generate <config>    Generate a .maglev config file from env vars");
             eprintln!("    apply <config>       Create VMs from a .maglev config file");
+            eprintln!(
+                "    destroy <config>     Permanently delete VMs described in a .maglev config file"
+            );
             eprintln!("    print                Run the credential builder");
             std::process::exit(1);
         }
@@ -1045,5 +1060,128 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
 
     println!("✓ Config written to: {config_path}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Compute Engine — DELETE instance  (add after create_vm)
+// ---------------------------------------------------------------------------
+
+/// Sends `DELETE .../instances/{instance_name}` and returns the Operation JSON.
+fn delete_vm(
+    access_token: &str,
+    project_id: &str,
+    zone: &str,
+    instance_name: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let url = format!(
+        "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_name}"
+    );
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let mut resp = agent
+        .delete(&url)
+        .header("Authorization", &format!("Bearer {access_token}"))
+        .call()?;
+
+    let status = resp.status();
+    let body: Value = resp.body_mut().read_json()?;
+
+    if !status.is_success() {
+        return Err(format!("Compute Engine API returned HTTP {status}: {body}").into());
+    }
+
+    Ok(body)
+}
+
+// ---------------------------------------------------------------------------
+// `destroy` subcommand  (add after apply_config)
+// ---------------------------------------------------------------------------
+
+fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Maglev Destroy ===\n");
+    println!("Reading config: {config_path}");
+
+    let content = fs::read_to_string(config_path)
+        .map_err(|e| format!("Cannot read config file '{config_path}': {e}"))?;
+
+    let config = parse_maglev_config(&content)?;
+
+    let require = |key: &str| -> Result<String, Box<dyn std::error::Error>> {
+        config
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("Missing required field '{key}' in {config_path}").into())
+    };
+
+    // ── Instance names ───────────────────────────────────────────────────────
+    let cp_instance_name = require("node_control_plane.instance_name")?;
+    let worker_instance_name = require("node_worker.instance_name")?;
+
+    // ── GCP credentials ──────────────────────────────────────────────────────
+    let client_email = require("gcp_config.client_email")?;
+    let private_key_path = require("gcp_config.private_key")?;
+    let project_id = require("gcp_config.project_id")?;
+    let zone = require("gcp_config.zone")?;
+
+    let expanded_key_path = expand_tilde(&private_key_path);
+    let private_key = fs::read_to_string(&expanded_key_path)
+        .map_err(|e| format!("Cannot read private key from '{expanded_key_path}': {e}"))?;
+
+    // ── Summary + confirmation ───────────────────────────────────────────────
+    println!("\n── Instances to destroy ────────────────────────────────────────────────");
+    println!("  Project:         {project_id}");
+    println!("  Zone:            {zone}");
+    println!("  Service account: {client_email}");
+    println!();
+    println!("  control-plane  → {cp_instance_name}");
+    println!("  worker         → {worker_instance_name}");
+    println!();
+    println!("⚠  This action is IRREVERSIBLE. Both VM instances and their boot disks");
+    println!("   will be permanently deleted.");
+
+    if !prompt_yes_no("\nProceed with destroying both VM instances?") {
+        println!("Aborted — nothing was deleted.");
+        return Ok(());
+    }
+
+    // ── Authenticate ─────────────────────────────────────────────────────────
+    println!("\n  Signing JWT with RSA-SHA256...");
+    let jwt = create_jwt(
+        &private_key,
+        &client_email,
+        "https://www.googleapis.com/auth/compute",
+    )?;
+
+    println!("  Exchanging JWT for OAuth2 access token...");
+    let access_token = get_access_token(&jwt)?;
+
+    // ── Delete control-plane ─────────────────────────────────────────────────
+    println!("\n  ── Deleting control-plane node ({cp_instance_name}) ──");
+    match delete_vm(&access_token, &project_id, &zone, &cp_instance_name) {
+        Ok(body) => println!("{}", serde_json::to_string_pretty(&body)?),
+        Err(e) => {
+            eprintln!("  ✗ Failed to delete control-plane node: {e}");
+            eprintln!("    The worker node will still be attempted.");
+        }
+    }
+
+    // ── Delete worker ────────────────────────────────────────────────────────
+    println!("\n  ── Deleting worker node ({worker_instance_name}) ──");
+    match delete_vm(&access_token, &project_id, &zone, &worker_instance_name) {
+        Ok(body) => println!("{}", serde_json::to_string_pretty(&body)?),
+        Err(e) => {
+            eprintln!("  ✗ Failed to delete worker node: {e}");
+        }
+    }
+
+    println!("\n✓ Deletion requests submitted. GCP operations may take a minute to complete.");
+    println!("  Track progress:");
+    println!("    gcloud compute operations list --filter=\"zone:{zone}\" --project={project_id}");
+
     Ok(())
 }
