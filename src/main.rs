@@ -1447,31 +1447,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Step 2 — Worker
-    // ════════════════════════════════════════════════════════════════════════
-    println!("\n━━ Step 2 / 3 — Worker node provisioning ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
-    println!("  Host    : {ssh_user}@{worker_ip}");
-    println!("  Command : sudo cisak install -y");
-    println!();
-    println!("  ⚠  This will install Kubernetes on the worker node.");
-
-    if !prompt_yes_no("  Proceed?") {
-        println!("Aborted.");
-        return Ok(());
-    }
-
-    println!("\n  Running provisioning on worker — this may take several minutes …\n");
-    ssh_run(
-        &worker_ip,
-        &ssh_user,
-        &worker_ssh_priv_path,
-        "sudo cisak install -y",
-    )?;
-    println!("\n  ✓ Worker provisioned.");
-
-    // ════════════════════════════════════════════════════════════════════════
-    // Step 3 — Join worker to control-plane
+    // Step 2 — Join worker to control-plane
     // ════════════════════════════════════════════════════════════════════════
     println!("\n━━ Step 3 / 3 — Join worker to control-plane ━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
