@@ -232,12 +232,11 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 
         let pem = generate_rsa_private_key_pem()?;
 
-        if let Some(parent) = Path::new(&key_path).parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = Path::new(&key_path).parent()
+            && !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Cannot create parent directories: {e}"))?;
             }
-        }
 
         fs::write(&key_path, &pem)
             .map_err(|e| format!("Cannot write private key to '{key_path}': {e}"))?;
@@ -789,9 +788,7 @@ fn parse_maglev_config(
 
             if header.starts_with("maglev") {
                 // Extract the optional label: maglev "prod" → "prod"
-                let label = header
-                    .splitn(2, '"')
-                    .nth(1)
+                let label = header.split_once('"').map(|x| x.1)
                     .and_then(|s| s.split('"').next())
                     .unwrap_or("")
                     .to_string();
@@ -825,9 +822,7 @@ fn parse_maglev_config(
 
         // Prefix with the innermost non-maglev block, if any.
         let full_key = block_stack
-            .iter()
-            .filter(|b| b.as_str() != "maglev")
-            .last()
+            .iter().rfind(|b| b.as_str() != "maglev")
             .map(|b| format!("{b}.{key}"))
             .unwrap_or_else(|| key.to_string());
 
