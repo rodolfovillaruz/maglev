@@ -255,22 +255,42 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 }
 
 // ---------------------------------------------------------------------------
-// HCL block renderer
-//
-//   render_block(2, "node", &[("machine_type", "e2-medium"), ...])
-//
-//   →   node {
-//         machine_type = "e2-medium"
-//         ...
-//       }
+// HCL block renderers
 // ---------------------------------------------------------------------------
 
+/// Renders an unlabeled block:
+///   <indent><name> {
+///     key = "value"
+///   }
 fn render_block(indent: usize, block_name: &str, fields: &[(&str, &str)]) -> String {
     let outer = " ".repeat(indent);
     let inner = " ".repeat(indent + 2);
     let max_key = fields.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
 
     let mut out = format!("{outer}{block_name} {{\n");
+    for (key, value) in fields {
+        let pad = " ".repeat(max_key - key.len() + 1);
+        out.push_str(&format!("{inner}{key}{pad}= \"{value}\"\n"));
+    }
+    out.push_str(&format!("{outer}}}\n"));
+    out
+}
+
+/// Renders a labeled block:
+///   <indent><block_type> "<label>" {
+///     key = "value"
+///   }
+fn render_labeled_block(
+    indent: usize,
+    block_type: &str,
+    label: &str,
+    fields: &[(&str, &str)],
+) -> String {
+    let outer = " ".repeat(indent);
+    let inner = " ".repeat(indent + 2);
+    let max_key = fields.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+
+    let mut out = format!("{outer}{block_type} \"{label}\" {{\n");
     for (key, value) in fields {
         let pad = " ".repeat(max_key - key.len() + 1);
         out.push_str(&format!("{inner}{key}{pad}= \"{value}\"\n"));
@@ -335,7 +355,7 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         println!("⚠ Keep this file secure!");
     }
 
-    if prompt_yes_no("\nCreate a VM instance now?") {
+    if prompt_yes_no("\nCreate VM instances now?") {
         let project_id = if let Ok(p) = env::var("MAGLEV_PROJECT_ID") {
             p
         } else {
@@ -350,12 +370,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
         let machine_type =
             env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
-        let instance_name = env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| {
-            format!(
-                "maglev-vm-{}",
-                time::OffsetDateTime::now_utc().unix_timestamp()
-            )
-        });
         let boot_disk_image = env::var("MAGLEV_BOOT_DISK_IMAGE")
             .unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
         let boot_disk_size_gb: u64 = env::var("MAGLEV_BOOT_DISK_SIZE_GB")
@@ -364,8 +378,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(50);
         let ssh_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
             .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
-        let startup_script_path =
-            env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
 
         let ssh_key_content = read_ssh_public_key(&ssh_key_path).unwrap_or_else(|e| {
             eprintln!("  ⚠ Could not read SSH public key: {e}");
@@ -377,19 +389,35 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
             format!("ubuntu:{ssh_key_content}")
         };
 
-        let startup_script = read_startup_script(&startup_script_path);
+        let ts = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        println!("\n── Creating VM instance ────────────────────────────────────────────────");
-        println!("  Project:           {project_id}");
-        println!("  Zone:              {zone}");
-        println!("  Machine type:      {machine_type}");
-        println!("  Name:              {instance_name}");
-        println!("  Boot disk image:   {boot_disk_image}");
-        println!("  Boot disk size:    {boot_disk_size_gb} GB");
-        println!("  SSH key path:      {ssh_key_path}");
-        println!("  Startup script:    {startup_script_path}");
+        // ── Control-plane node ───────────────────────────────────────────────
+        let cp_instance_name =
+            env::var("MAGLEV_CP_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-cp-{ts}"));
+        let cp_startup_script_path = env::var("MAGLEV_CP_STARTUP_SCRIPT_PATH")
+            .unwrap_or_else(|_| "./startup-cp.sh".to_string());
+        let cp_startup_script = read_startup_script(&cp_startup_script_path);
 
-        println!("  Signing JWT with RSA-SHA256 (PEM-native)...");
+        // ── Worker node ──────────────────────────────────────────────────────
+        let worker_instance_name = env::var("MAGLEV_WORKER_INSTANCE_NAME")
+            .unwrap_or_else(|_| format!("maglev-worker-{ts}"));
+        let worker_startup_script_path = env::var("MAGLEV_WORKER_STARTUP_SCRIPT_PATH")
+            .unwrap_or_else(|_| "./startup.sh".to_string());
+        let worker_startup_script = read_startup_script(&worker_startup_script_path);
+
+        println!("\n── Creating VM instances ───────────────────────────────────────────────");
+        println!("  Project:                  {project_id}");
+        println!("  Zone:                     {zone}");
+        println!("  Machine type:             {machine_type}");
+        println!("  Boot disk image:          {boot_disk_image}");
+        println!("  Boot disk size:           {boot_disk_size_gb} GB");
+        println!("  SSH key path:             {ssh_key_path}");
+        println!("  [control-plane] Name:     {cp_instance_name}");
+        println!("  [control-plane] Script:   {cp_startup_script_path}");
+        println!("  [worker]        Name:     {worker_instance_name}");
+        println!("  [worker]        Script:   {worker_startup_script_path}");
+
+        println!("  Signing JWT...");
         let jwt = create_jwt(
             &private_key,
             &client_email,
@@ -399,21 +427,35 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Exchanging JWT for OAuth2 access token...");
         let access_token = get_access_token(&jwt)?;
 
-        println!("  Calling Compute Engine API...");
-        let response = create_vm(
+        println!("\n  ── Creating control-plane node ({cp_instance_name}) ──");
+        let cp_response = create_vm(
             &access_token,
             &project_id,
             &zone,
-            &instance_name,
+            &cp_instance_name,
             &machine_type,
             &boot_disk_image,
             boot_disk_size_gb,
             &ssh_keys_metadata,
-            &startup_script,
+            &cp_startup_script,
         )?;
+        println!("{}", serde_json::to_string_pretty(&cp_response)?);
 
-        println!("\n✓ VM creation requested. Operation response:\n");
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        println!("\n  ── Creating worker node ({worker_instance_name}) ──");
+        let worker_response = create_vm(
+            &access_token,
+            &project_id,
+            &zone,
+            &worker_instance_name,
+            &machine_type,
+            &boot_disk_image,
+            boot_disk_size_gb,
+            &ssh_keys_metadata,
+            &worker_startup_script,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&worker_response)?);
+
+        println!("\n✓ Both VM creation requests submitted successfully.");
     }
 
     Ok(())
@@ -457,7 +499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!();
             eprintln!("SUBCOMMANDS:");
             eprintln!("    generate <config>    Generate a .maglev config file from env vars");
-            eprintln!("    apply <config>       Create a VM from a .maglev config file");
+            eprintln!("    apply <config>       Create VMs from a .maglev config file");
             eprintln!("    print                Run the credential builder");
             std::process::exit(1);
         }
@@ -615,26 +657,22 @@ fn create_vm(
 // ---------------------------------------------------------------------------
 // .maglev config parser
 //
-// Supports the nested HCL-like structure produced by `format_config`:
+// Supports labeled node blocks:
 //
 //   maglev "prod" {
-//     node       { ... }
-//     node_pool  { ... }
-//     gcp_config { ... }
+//     node "control_plane" { ... }   → keys: node_control_plane.<key>
+//     node "worker"        { ... }   → keys: node_worker.<key>
+//     node_pool  { ... }             → keys: node_pool.<key>
+//     gcp_config { ... }             → keys: gcp_config.<key>
 //   }
 //
-// Keys from nested blocks are stored as "<block>.<key>", e.g.
-//   "node.machine_type", "gcp_config.project_id", "node_pool.name".
-//
-// The maglev label itself is stored as "name".
+// The maglev label is stored as "name".
 // ---------------------------------------------------------------------------
 
 fn parse_maglev_config(
     content: &str,
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
     let mut map = std::collections::HashMap::new();
-
-    // A stack of block names; the outermost entry is always "maglev".
     let mut block_stack: Vec<String> = Vec::new();
 
     for raw_line in content.lines() {
@@ -655,7 +693,7 @@ fn parse_maglev_config(
             let header = line.trim_end_matches('{').trim();
 
             if header.starts_with("maglev") {
-                // Extract the optional label: maglev "prod" → "prod"
+                // maglev "label" → store label under "name"
                 let label = header
                     .split_once('"')
                     .map(|x| x.1)
@@ -668,8 +706,17 @@ fn parse_maglev_config(
                 }
 
                 block_stack.push("maglev".to_string());
+            } else if let Some((block_type, rest)) = header.split_once(' ') {
+                // block_type "label"  →  block_type_label
+                let label = rest.trim().trim_matches('"');
+                let prefix = if label.is_empty() {
+                    block_type.to_string()
+                } else {
+                    format!("{block_type}_{label}")
+                };
+                block_stack.push(prefix);
             } else {
-                // Bare block names: node, node_pool, gcp_config, …
+                // Bare block name: node_pool, gcp_config, …
                 block_stack.push(header.to_string());
             }
 
@@ -701,7 +748,9 @@ fn parse_maglev_config(
     }
 
     Ok(map)
-} // ---------------------------------------------------------------------------
+}
+
+// ---------------------------------------------------------------------------
 // `apply` subcommand
 // ---------------------------------------------------------------------------
 
@@ -721,10 +770,15 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or_else(|| format!("Missing required field '{key}' in {config_path}").into())
     };
 
-    // ── node block ───────────────────────────────────────────────────────────
-    let instance_name = require("node.instance_name")?;
-    let ssh_public_key_path = require("node.ssh_public_key_path")?;
-    let startup_script_path = require("node.startup_script_path")?;
+    // ── node "control_plane" block ───────────────────────────────────────────
+    let cp_instance_name = require("node_control_plane.instance_name")?;
+    let cp_ssh_public_key_path = require("node_control_plane.ssh_public_key_path")?;
+    let cp_startup_script_path = require("node_control_plane.startup_script_path")?;
+
+    // ── node "worker" block ──────────────────────────────────────────────────
+    let worker_instance_name = require("node_worker.instance_name")?;
+    let worker_ssh_public_key_path = require("node_worker.ssh_public_key_path")?;
+    let worker_startup_script_path = require("node_worker.startup_script_path")?;
 
     // ── node_pool block ──────────────────────────────────────────────────────
     let boot_disk_image = require("node_pool.boot_disk_image")?;
@@ -748,32 +802,40 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let private_key = fs::read_to_string(&expanded_key_path)
         .map_err(|e| format!("Cannot read private key from '{expanded_key_path}': {e}"))?;
 
-    // ── SSH public key ───────────────────────────────────────────────────────
-    let ssh_key_content = read_ssh_public_key(&ssh_public_key_path).unwrap_or_else(|e| {
-        eprintln!("  ⚠ Could not read SSH public key: {e}");
-        String::new()
-    });
-    let ssh_keys_metadata = if ssh_key_content.is_empty() {
-        String::new()
-    } else {
-        format!("ubuntu:{ssh_key_content}")
+    // ── SSH public keys ──────────────────────────────────────────────────────
+    let make_ssh_metadata = |path: &str| -> String {
+        read_ssh_public_key(path)
+            .map(|k| format!("ubuntu:{k}"))
+            .unwrap_or_else(|e| {
+                eprintln!("  ⚠ Could not read SSH public key from '{path}': {e}");
+                String::new()
+            })
     };
 
-    let startup_script = read_startup_script(&startup_script_path);
+    let cp_ssh_metadata = make_ssh_metadata(&cp_ssh_public_key_path);
+    let worker_ssh_metadata = make_ssh_metadata(&worker_ssh_public_key_path);
+
+    let cp_startup_script = read_startup_script(&cp_startup_script_path);
+    let worker_startup_script = read_startup_script(&worker_startup_script_path);
 
     // ── Summary ──────────────────────────────────────────────────────────────
-    println!("\n── Instance details ────────────────────────────────────────────────────");
+    println!("\n── Shared settings ─────────────────────────────────────────────────────");
     println!("  Project:           {project_id}");
     println!("  Zone:              {zone}");
     println!("  Machine type:      {machine_type}");
-    println!("  Name:              {instance_name}");
     println!("  Boot disk image:   {boot_disk_image}");
     println!("  Boot disk size:    {boot_disk_size_gb} GB");
-    println!("  SSH key path:      {ssh_public_key_path}");
-    println!("  Startup script:    {startup_script_path}");
     println!("  Service account:   {client_email}");
+    println!("\n── control-plane node ──────────────────────────────────────────────────");
+    println!("  Name:              {cp_instance_name}");
+    println!("  SSH key:           {cp_ssh_public_key_path}");
+    println!("  Startup script:    {cp_startup_script_path}");
+    println!("\n── worker node ─────────────────────────────────────────────────────────");
+    println!("  Name:              {worker_instance_name}");
+    println!("  SSH key:           {worker_ssh_public_key_path}");
+    println!("  Startup script:    {worker_startup_script_path}");
 
-    if !prompt_yes_no("\nProceed with creating the VM instance?") {
+    if !prompt_yes_no("\nProceed with creating both VM instances?") {
         println!("Aborted.");
         return Ok(());
     }
@@ -788,22 +850,37 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Exchanging JWT for OAuth2 access token...");
     let access_token = get_access_token(&jwt)?;
 
-    println!("  Calling Compute Engine API...");
-    let response = create_vm(
+    // ── Create control-plane node ────────────────────────────────────────────
+    println!("\n  ── Creating control-plane node ({cp_instance_name}) ──");
+    let cp_response = create_vm(
         &access_token,
         &project_id,
         &zone,
-        &instance_name,
+        &cp_instance_name,
         &machine_type,
         &boot_disk_image,
         boot_disk_size_gb,
-        &ssh_keys_metadata,
-        &startup_script,
+        &cp_ssh_metadata,
+        &cp_startup_script,
     )?;
+    println!("{}", serde_json::to_string_pretty(&cp_response)?);
 
-    println!("\n✓ VM creation requested. Operation response:\n");
-    println!("{}", serde_json::to_string_pretty(&response)?);
+    // ── Create worker node ───────────────────────────────────────────────────
+    println!("\n  ── Creating worker node ({worker_instance_name}) ──");
+    let worker_response = create_vm(
+        &access_token,
+        &project_id,
+        &zone,
+        &worker_instance_name,
+        &machine_type,
+        &boot_disk_image,
+        boot_disk_size_gb,
+        &worker_ssh_metadata,
+        &worker_startup_script,
+    )?;
+    println!("{}", serde_json::to_string_pretty(&worker_response)?);
 
+    println!("\n✓ Both VM creation requests submitted successfully.");
     Ok(())
 }
 
@@ -811,7 +888,10 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 // Configuration structs (mirror the HCL blocks)
 // ---------------------------------------------------------------------------
 
+/// A single node entry (control_plane or worker).
 struct NodeConfig<'a> {
+    /// The block label used in the config file, e.g. `"control_plane"` or `"worker"`.
+    label: &'a str,
     instance_name: &'a str,
     ssh_public_key_path: &'a str,
     startup_script_path: &'a str,
@@ -837,21 +917,29 @@ struct GcpConfig<'a> {
 
 fn format_config(
     name: &str,
-    node: &NodeConfig<'_>,
+    nodes: &[NodeConfig<'_>],
     node_pool: &NodePoolConfig<'_>,
     gcp: &GcpConfig<'_>,
 ) -> String {
-    let node_block = render_block(
-        2,
-        "node",
-        &[
-            ("instance_name", node.instance_name),
-            ("ssh_public_key_path", node.ssh_public_key_path),
-            ("startup_script_path", node.startup_script_path),
-        ],
-    );
+    let mut body = String::new();
 
-    let node_pool_block = render_block(
+    // One labeled node block per entry.
+    for node in nodes {
+        let block = render_labeled_block(
+            2,
+            "node",
+            node.label,
+            &[
+                ("instance_name", node.instance_name),
+                ("ssh_public_key_path", node.ssh_public_key_path),
+                ("startup_script_path", node.startup_script_path),
+            ],
+        );
+        body.push_str(&block);
+        body.push('\n');
+    }
+
+    body.push_str(&render_block(
         2,
         "node_pool",
         &[
@@ -860,9 +948,10 @@ fn format_config(
             ("machine_type", node_pool.machine_type),
             ("name", node_pool.name),
         ],
-    );
+    ));
+    body.push('\n');
 
-    let gcp_block = render_block(
+    body.push_str(&render_block(
         2,
         "gcp_config",
         &[
@@ -871,9 +960,9 @@ fn format_config(
             ("project_id", gcp.project_id),
             ("zone", gcp.zone),
         ],
-    );
+    ));
 
-    format!("maglev \"{name}\" {{\n\n{node_block}\n{node_pool_block}\n{gcp_block}\n}}\n")
+    format!("maglev \"{name}\" {{\n\n{body}\n}}\n")
 }
 
 fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -901,8 +990,6 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
     let private_key =
         env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| ".keys/private_key.pem".to_string());
-    let instance_name =
-        env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-vm-{name}"));
     let machine_type = env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
     let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
     let boot_disk_image =
@@ -911,16 +998,35 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         env::var("MAGLEV_BOOT_DISK_SIZE_GB").unwrap_or_else(|_| "50".to_string());
     let ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
         .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
-    let startup_script_path =
-        env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
+
+    // ── control-plane defaults ───────────────────────────────────────────────
+    let cp_instance_name =
+        env::var("MAGLEV_CP_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-cp-{name}"));
+    let cp_startup_script_path =
+        env::var("MAGLEV_CP_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup-cp.sh".to_string());
+
+    // ── worker defaults ──────────────────────────────────────────────────────
+    let worker_instance_name =
+        env::var("MAGLEV_WORKER_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-worker-{name}"));
+    let worker_startup_script_path = env::var("MAGLEV_WORKER_STARTUP_SCRIPT_PATH")
+        .unwrap_or_else(|_| "./startup.sh".to_string());
 
     let config = format_config(
         &name,
-        &NodeConfig {
-            instance_name: &instance_name,
-            ssh_public_key_path: &ssh_public_key_path,
-            startup_script_path: &startup_script_path,
-        },
+        &[
+            NodeConfig {
+                label: "control_plane",
+                instance_name: &cp_instance_name,
+                ssh_public_key_path: &ssh_public_key_path,
+                startup_script_path: &cp_startup_script_path,
+            },
+            NodeConfig {
+                label: "worker",
+                instance_name: &worker_instance_name,
+                ssh_public_key_path: &ssh_public_key_path,
+                startup_script_path: &worker_startup_script_path,
+            },
+        ],
         &NodePoolConfig {
             boot_disk_image: &boot_disk_image,
             boot_disk_size_gb: &boot_disk_size_gb,
