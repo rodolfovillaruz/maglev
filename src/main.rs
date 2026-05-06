@@ -491,7 +491,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
 
-        // ── NEW ──────────────────────────────────────────────────────────────
         Some("destroy") => match env::args().nth(2) {
             Some(path) => destroy_config(&path),
             None => {
@@ -499,6 +498,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!();
                 eprintln!("USAGE:");
                 eprintln!("    maglev destroy <config.maglev>");
+                std::process::exit(1);
+            }
+        },
+
+        // ── NEW ──────────────────────────────────────────────────────────────
+        Some("play") => match env::args().nth(2) {
+            Some(path) => play_config(&path),
+            None => {
+                eprintln!("error: 'play' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev play <config.maglev>");
                 std::process::exit(1);
             }
         },
@@ -513,7 +524,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("    generate <config>    Generate a .maglev config file from env vars");
             eprintln!("    apply <config>       Create VMs from a .maglev config file");
             eprintln!(
-                "    destroy <config>     Permanently delete VMs described in a .maglev config file"
+                "    destroy <config>     Permanently delete VMs described in a .maglev config"
+            );
+            eprintln!(
+                "    play <config>        Provision Kubernetes and join the worker to the control-plane"
             );
             eprintln!("    print                Run the credential builder");
             std::process::exit(1);
@@ -1182,6 +1196,333 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n✓ Deletion requests submitted. GCP operations may take a minute to complete.");
     println!("  Track progress:");
     println!("    gcloud compute operations list --filter=\"zone:{zone}\" --project={project_id}");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Compute Engine — GET instance  (fetch external IP)
+// ---------------------------------------------------------------------------
+
+fn get_vm_ip(
+    access_token: &str,
+    project_id: &str,
+    zone: &str,
+    instance_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let url = format!(
+        "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_name}"
+    );
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let mut resp = agent
+        .get(&url)
+        .header("Authorization", &format!("Bearer {access_token}"))
+        .call()?;
+
+    let status = resp.status();
+    let body: Value = resp.body_mut().read_json()?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Compute Engine API returned HTTP {status} while fetching '{instance_name}': {body}"
+        )
+        .into());
+    }
+
+    body["networkInterfaces"][0]["accessConfigs"][0]["natIP"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("No external (NAT) IP found for instance '{instance_name}'").into())
+}
+
+// ---------------------------------------------------------------------------
+// SSH helpers  (uses the system `ssh` binary — no native dep needed)
+// ---------------------------------------------------------------------------
+
+/// Run a command over SSH and **capture** its stdout.
+/// The command must always exit 0 (e.g. `test … && echo yes || echo no`).
+fn ssh_capture(
+    ip: &str,
+    user: &str,
+    private_key_path: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let out = std::process::Command::new("ssh")
+        .args([
+            "-i",
+            private_key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "LogLevel=ERROR",
+            &format!("{user}@{ip}"),
+            command,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to spawn ssh for capture: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "ssh capture command exited {} — stderr: {stderr}",
+            out.status.code().unwrap_or(-1),
+        )
+        .into());
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Run a command over SSH and **stream** its output to the terminal.
+/// Pass `-t` so `sudo` can inherit the PTY when needed.
+fn ssh_run(
+    ip: &str,
+    user: &str,
+    private_key_path: &str,
+    command: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let status = std::process::Command::new("ssh")
+        .args([
+            "-i",
+            private_key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=30",
+            "-o",
+            "LogLevel=ERROR",
+            "-t", // allocate pseudo-TTY so sudo / interactive tools work
+            &format!("{user}@{ip}"),
+            command,
+        ])
+        .status()
+        .map_err(|e| format!("Failed to spawn ssh for run: {e}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Remote command exited with code {}",
+            status.code().unwrap_or(-1)
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `play` subcommand
+//
+// 1. Check if /etc/kubernetes/admin.conf exists on the control-plane.
+//    • If missing  → ask → run `sudo cisak install --control-plane -y`
+//    • If present  → skip
+// 2. Ask → run `sudo cisak install -y` on the worker.
+// 3. Ask → fetch `kubeadm token create --print-join-command` from the
+//    control-plane, show it, ask again, then run it on the worker.
+// ---------------------------------------------------------------------------
+
+fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Maglev Play ===\n");
+    println!("Reading config: {config_path}");
+
+    let content = fs::read_to_string(config_path)
+        .map_err(|e| format!("Cannot read config file '{config_path}': {e}"))?;
+
+    let config = parse_maglev_config(&content)?;
+
+    let require = |key: &str| -> Result<String, Box<dyn std::error::Error>> {
+        config
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("Missing required field '{key}' in {config_path}").into())
+    };
+
+    // ── Config fields ────────────────────────────────────────────────────────
+    let cp_instance_name = require("node_control_plane.instance_name")?;
+    let cp_ssh_pub_path = require("node_control_plane.ssh_public_key_path")?;
+
+    let worker_instance_name = require("node_worker.instance_name")?;
+    let worker_ssh_pub_path = require("node_worker.ssh_public_key_path")?;
+
+    let client_email = require("gcp_config.client_email")?;
+    let gcp_private_key_path = require("gcp_config.private_key")?;
+    let project_id = require("gcp_config.project_id")?;
+    let zone = require("gcp_config.zone")?;
+
+    // Derive private SSH key paths: strip the `.pub` suffix (standard convention).
+    let cp_ssh_priv_path = expand_tilde(
+        cp_ssh_pub_path
+            .strip_suffix(".pub")
+            .unwrap_or(&cp_ssh_pub_path),
+    );
+    let worker_ssh_priv_path = expand_tilde(
+        worker_ssh_pub_path
+            .strip_suffix(".pub")
+            .unwrap_or(&worker_ssh_pub_path),
+    );
+
+    // SSH user — configurable via env, defaulting to "ubuntu".
+    let ssh_user = env::var("MAGLEV_SSH_USER").unwrap_or_else(|_| "ubuntu".to_string());
+
+    // ── Authenticate with GCP ────────────────────────────────────────────────
+    let expanded_gcp_key = expand_tilde(&gcp_private_key_path);
+    let gcp_private_key = fs::read_to_string(&expanded_gcp_key)
+        .map_err(|e| format!("Cannot read GCP private key from '{expanded_gcp_key}': {e}"))?;
+
+    println!("\n  Signing JWT...");
+    let jwt = create_jwt(
+        &gcp_private_key,
+        &client_email,
+        "https://www.googleapis.com/auth/compute",
+    )?;
+
+    println!("  Exchanging JWT for OAuth2 access token...");
+    let access_token = get_access_token(&jwt)?;
+
+    // ── Resolve external IPs ─────────────────────────────────────────────────
+    println!("\n  Fetching external IPs from Compute Engine API...");
+    let cp_ip = get_vm_ip(&access_token, &project_id, &zone, &cp_instance_name)?;
+    let worker_ip = get_vm_ip(&access_token, &project_id, &zone, &worker_instance_name)?;
+
+    println!("  Control-plane : {cp_instance_name}  →  {cp_ip}");
+    println!("  Worker        : {worker_instance_name}  →  {worker_ip}");
+    println!("  SSH user      : {ssh_user}");
+    println!("  SSH key (cp)  : {cp_ssh_priv_path}");
+    println!("  SSH key (wkr) : {worker_ssh_priv_path}");
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Step 1 — Control-plane
+    // ════════════════════════════════════════════════════════════════════════
+    println!("\n━━ Step 1 / 3 — Control-plane provisioning ━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("  Checking /etc/kubernetes/admin.conf on {cp_instance_name} ({cp_ip}) …");
+
+    if !prompt_yes_no(&format!("  Run check command on {ssh_user}@{cp_ip}?")) {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    let check_out = ssh_capture(
+        &cp_ip,
+        &ssh_user,
+        &cp_ssh_priv_path,
+        "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+    )?;
+
+    let cp_ready = check_out.trim() == "yes";
+
+    if cp_ready {
+        println!("  ✓ /etc/kubernetes/admin.conf found — control-plane is already provisioned.");
+    } else {
+        println!("  /etc/kubernetes/admin.conf not found — control-plane needs provisioning.");
+        println!();
+        println!("  Host    : {ssh_user}@{cp_ip}");
+        println!("  Command : sudo cisak install --control-plane -y");
+        println!();
+        println!("  ⚠  This will install Kubernetes on the control-plane node.");
+
+        if !prompt_yes_no("  Proceed?") {
+            println!("Aborted.");
+            return Ok(());
+        }
+
+        println!("\n  Running provisioning on control-plane — this may take several minutes …\n");
+        ssh_run(
+            &cp_ip,
+            &ssh_user,
+            &cp_ssh_priv_path,
+            "sudo cisak install --control-plane -y",
+        )?;
+        println!("\n  ✓ Control-plane provisioned.");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Step 2 — Worker
+    // ════════════════════════════════════════════════════════════════════════
+    println!("\n━━ Step 2 / 3 — Worker node provisioning ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("  Host    : {ssh_user}@{worker_ip}");
+    println!("  Command : sudo cisak install -y");
+    println!();
+    println!("  ⚠  This will install Kubernetes on the worker node.");
+
+    if !prompt_yes_no("  Proceed?") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    println!("\n  Running provisioning on worker — this may take several minutes …\n");
+    ssh_run(
+        &worker_ip,
+        &ssh_user,
+        &worker_ssh_priv_path,
+        "sudo cisak install -y",
+    )?;
+    println!("\n  ✓ Worker provisioned.");
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Step 3 — Join worker to control-plane
+    // ════════════════════════════════════════════════════════════════════════
+    println!("\n━━ Step 3 / 3 — Join worker to control-plane ━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("  Host    : {ssh_user}@{cp_ip}");
+    println!("  Command : sudo kubeadm token create --print-join-command");
+
+    if !prompt_yes_no("  Fetch join command from control-plane?") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    let join_command = ssh_capture(
+        &cp_ip,
+        &ssh_user,
+        &cp_ssh_priv_path,
+        "sudo kubeadm token create --print-join-command",
+    )?;
+
+    if join_command.is_empty() {
+        return Err(
+            "kubeadm returned an empty join command — is the control-plane fully up?".into(),
+        );
+    }
+
+    println!();
+    println!("  Join command received:");
+    println!("    {join_command}");
+    println!();
+    println!("  Will run on worker ({ssh_user}@{worker_ip}):");
+    println!("    sudo {join_command}");
+    println!();
+    println!("  ⚠  The worker will be permanently joined to this cluster.");
+
+    if !prompt_yes_no("  Proceed?") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    println!("\n  Joining worker to control-plane …\n");
+    ssh_run(
+        &worker_ip,
+        &ssh_user,
+        &worker_ssh_priv_path,
+        &format!("sudo {join_command}"),
+    )?;
+
+    println!("\n✓ Cluster is ready!");
+    println!();
+    println!("  Verify from the control-plane:");
+    println!("    ssh -i {cp_ssh_priv_path} {ssh_user}@{cp_ip}");
+    println!("    kubectl get nodes -o wide");
 
     Ok(())
 }
