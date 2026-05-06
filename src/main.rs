@@ -701,9 +701,7 @@ fn parse_maglev_config(
     }
 
     Ok(map)
-}
-
-// ---------------------------------------------------------------------------
+} // ---------------------------------------------------------------------------
 // `apply` subcommand
 // ---------------------------------------------------------------------------
 
@@ -716,7 +714,6 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = parse_maglev_config(&content)?;
 
-    // Helper — look up a dotted key and give a clear error when it is absent.
     let require = |key: &str| -> Result<String, Box<dyn std::error::Error>> {
         config
             .get(key)
@@ -725,16 +722,16 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ── node block ───────────────────────────────────────────────────────────
-    let boot_disk_image = require("node.boot_disk_image")?;
-    let boot_disk_size_gb: u64 = require("node.boot_disk_size_gb")?
-        .parse()
-        .map_err(|_| "Field 'node.boot_disk_size_gb' must be a positive integer")?;
     let instance_name = require("node.instance_name")?;
-    let machine_type = require("node.machine_type")?;
     let ssh_public_key_path = require("node.ssh_public_key_path")?;
     let startup_script_path = require("node.startup_script_path")?;
 
     // ── node_pool block ──────────────────────────────────────────────────────
+    let boot_disk_image = require("node_pool.boot_disk_image")?;
+    let boot_disk_size_gb: u64 = require("node_pool.boot_disk_size_gb")?
+        .parse()
+        .map_err(|_| "Field 'node_pool.boot_disk_size_gb' must be a positive integer")?;
+    let machine_type = require("node_pool.machine_type")?;
     let _pool_name = config
         .get("node_pool.name")
         .cloned()
@@ -815,12 +812,16 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 struct NodeConfig<'a> {
-    boot_disk_image: &'a str,
-    boot_disk_size_gb: &'a str,
     instance_name: &'a str,
-    machine_type: &'a str,
     ssh_public_key_path: &'a str,
     startup_script_path: &'a str,
+}
+
+struct NodePoolConfig<'a> {
+    boot_disk_image: &'a str,
+    boot_disk_size_gb: &'a str,
+    machine_type: &'a str,
+    name: &'a str,
 }
 
 struct GcpConfig<'a> {
@@ -834,21 +835,32 @@ struct GcpConfig<'a> {
 // `generate` subcommand
 // ---------------------------------------------------------------------------
 
-fn format_config(name: &str, node: &NodeConfig<'_>, gcp: &GcpConfig<'_>) -> String {
+fn format_config(
+    name: &str,
+    node: &NodeConfig<'_>,
+    node_pool: &NodePoolConfig<'_>,
+    gcp: &GcpConfig<'_>,
+) -> String {
     let node_block = render_block(
         2,
         "node",
         &[
-            ("boot_disk_image", node.boot_disk_image),
-            ("boot_disk_size_gb", node.boot_disk_size_gb),
             ("instance_name", node.instance_name),
-            ("machine_type", node.machine_type),
             ("ssh_public_key_path", node.ssh_public_key_path),
             ("startup_script_path", node.startup_script_path),
         ],
     );
 
-    let node_pool_block = render_block(2, "node_pool", &[("name", name)]);
+    let node_pool_block = render_block(
+        2,
+        "node_pool",
+        &[
+            ("boot_disk_image", node_pool.boot_disk_image),
+            ("boot_disk_size_gb", node_pool.boot_disk_size_gb),
+            ("machine_type", node_pool.machine_type),
+            ("name", node_pool.name),
+        ],
+    );
 
     let gcp_block = render_block(
         2,
@@ -905,12 +917,15 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     let config = format_config(
         &name,
         &NodeConfig {
-            boot_disk_image: &boot_disk_image,
-            boot_disk_size_gb: &boot_disk_size_gb,
             instance_name: &instance_name,
-            machine_type: &machine_type,
             ssh_public_key_path: &ssh_public_key_path,
             startup_script_path: &startup_script_path,
+        },
+        &NodePoolConfig {
+            boot_disk_image: &boot_disk_image,
+            boot_disk_size_gb: &boot_disk_size_gb,
+            machine_type: &machine_type,
+            name: &name,
         },
         &GcpConfig {
             client_email: &client_email,
