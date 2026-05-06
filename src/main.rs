@@ -433,8 +433,10 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         client_email: client_email.clone(),
     };
 
-    let json_str = serde_json::to_string_pretty(&credentials)?;
-    println!("{json_str}");
+    if prompt_yes_no("\nPrint the JSON file") {
+        let json_str = serde_json::to_string_pretty(&credentials)?;
+        println!("{json_str}");
+    }
 
     // ── Save credentials ─────────────────────────────────────────────────────
 
