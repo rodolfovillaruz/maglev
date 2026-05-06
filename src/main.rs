@@ -233,10 +233,11 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
         let pem = generate_rsa_private_key_pem()?;
 
         if let Some(parent) = Path::new(&key_path).parent()
-            && !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Cannot create parent directories: {e}"))?;
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create parent directories: {e}"))?;
+        }
 
         fs::write(&key_path, &pem)
             .map_err(|e| format!("Cannot write private key to '{key_path}': {e}"))?;
@@ -276,139 +277,6 @@ fn render_block(indent: usize, block_name: &str, fields: &[(&str, &str)]) -> Str
     }
     out.push_str(&format!("{outer}}}\n"));
     out
-}
-
-// ---------------------------------------------------------------------------
-// `generate` subcommand
-// ---------------------------------------------------------------------------
-//
-// Output format:
-//
-//   maglev "prod" {
-//
-//     node {
-//       boot_disk_image     = "ubuntu-2404-lts-amd64"
-//       boot_disk_size_gb   = "50"
-//       instance_name       = "maglev-vm-prod"
-//       machine_type        = "e2-medium"
-//       ssh_public_key_path = "~/.ssh/id_ed25519.pub"
-//       startup_script_path = "./startup.sh"
-//     }
-//
-//     node_pool {
-//       name = "prod"
-//     }
-//
-//     gcp_config {
-//       client_email = "sa@project.iam.gserviceaccount.com"
-//       private_key  = ".keys/private_key.pem"
-//       project_id   = "my-project"
-//       zone         = "europe-north1-a"
-//     }
-//
-//   }
-
-fn format_config(
-    name: &str,
-    // ── node ──────────────────────────────────────────────────────────────────
-    boot_disk_image: &str,
-    boot_disk_size_gb: &str,
-    instance_name: &str,
-    machine_type: &str,
-    ssh_public_key_path: &str,
-    startup_script_path: &str,
-    // ── gcp_config ────────────────────────────────────────────────────────────
-    client_email: &str,
-    private_key: &str,
-    project_id: &str,
-    zone: &str,
-) -> String {
-    let node = render_block(
-        2,
-        "node",
-        &[
-            ("boot_disk_image", boot_disk_image),
-            ("boot_disk_size_gb", boot_disk_size_gb),
-            ("instance_name", instance_name),
-            ("machine_type", machine_type),
-            ("ssh_public_key_path", ssh_public_key_path),
-            ("startup_script_path", startup_script_path),
-        ],
-    );
-
-    let node_pool = render_block(2, "node_pool", &[("name", name)]);
-
-    let gcp_config = render_block(
-        2,
-        "gcp_config",
-        &[
-            ("client_email", client_email),
-            ("private_key", private_key),
-            ("project_id", project_id),
-            ("zone", zone),
-        ],
-    );
-
-    format!("maglev \"{name}\" {{\n\n{node}\n{node_pool}\n{gcp_config}\n}}\n")
-}
-
-fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if Path::new(config_path).exists() {
-        eprintln!("error: '{config_path}' already exists");
-        std::process::exit(1);
-    }
-
-    let name = Path::new(config_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("maglev")
-        .to_string();
-
-    let client_email = env::var("MAGLEV_CLIENT_EMAIL")
-        .map_err(|_| "MAGLEV_CLIENT_EMAIL environment variable is not set")?;
-
-    let derived_project = client_email
-        .split('@')
-        .nth(1)
-        .and_then(|domain| domain.split('.').next())
-        .unwrap_or("my-project")
-        .to_string();
-
-    let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
-    let private_key =
-        env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| ".keys/private_key.pem".to_string());
-    let instance_name =
-        env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-vm-{name}"));
-    let machine_type = env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
-    let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
-    let boot_disk_image =
-        env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
-    let boot_disk_size_gb =
-        env::var("MAGLEV_BOOT_DISK_SIZE_GB").unwrap_or_else(|_| "50".to_string());
-    let ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
-        .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
-    let startup_script_path =
-        env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
-
-    let config = format_config(
-        &name,
-        &boot_disk_image,
-        &boot_disk_size_gb,
-        &instance_name,
-        &machine_type,
-        &ssh_public_key_path,
-        &startup_script_path,
-        &client_email,
-        &private_key,
-        &project_id,
-        &zone,
-    );
-
-    fs::write(config_path, &config)
-        .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
-
-    println!("✓ Config written to: {config_path}");
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +656,9 @@ fn parse_maglev_config(
 
             if header.starts_with("maglev") {
                 // Extract the optional label: maglev "prod" → "prod"
-                let label = header.split_once('"').map(|x| x.1)
+                let label = header
+                    .split_once('"')
+                    .map(|x| x.1)
                     .and_then(|s| s.split('"').next())
                     .unwrap_or("")
                     .to_string();
@@ -822,7 +692,8 @@ fn parse_maglev_config(
 
         // Prefix with the innermost non-maglev block, if any.
         let full_key = block_stack
-            .iter().rfind(|b| b.as_str() != "maglev")
+            .iter()
+            .rfind(|b| b.as_str() != "maglev")
             .map(|b| format!("{b}.{key}"))
             .unwrap_or_else(|| key.to_string());
 
@@ -936,5 +807,122 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n✓ VM creation requested. Operation response:\n");
     println!("{}", serde_json::to_string_pretty(&response)?);
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Configuration structs (mirror the HCL blocks)
+// ---------------------------------------------------------------------------
+
+struct NodeConfig<'a> {
+    boot_disk_image: &'a str,
+    boot_disk_size_gb: &'a str,
+    instance_name: &'a str,
+    machine_type: &'a str,
+    ssh_public_key_path: &'a str,
+    startup_script_path: &'a str,
+}
+
+struct GcpConfig<'a> {
+    client_email: &'a str,
+    private_key: &'a str,
+    project_id: &'a str,
+    zone: &'a str,
+}
+
+// ---------------------------------------------------------------------------
+// `generate` subcommand
+// ---------------------------------------------------------------------------
+
+fn format_config(name: &str, node: &NodeConfig<'_>, gcp: &GcpConfig<'_>) -> String {
+    let node_block = render_block(
+        2,
+        "node",
+        &[
+            ("boot_disk_image", node.boot_disk_image),
+            ("boot_disk_size_gb", node.boot_disk_size_gb),
+            ("instance_name", node.instance_name),
+            ("machine_type", node.machine_type),
+            ("ssh_public_key_path", node.ssh_public_key_path),
+            ("startup_script_path", node.startup_script_path),
+        ],
+    );
+
+    let node_pool_block = render_block(2, "node_pool", &[("name", name)]);
+
+    let gcp_block = render_block(
+        2,
+        "gcp_config",
+        &[
+            ("client_email", gcp.client_email),
+            ("private_key", gcp.private_key),
+            ("project_id", gcp.project_id),
+            ("zone", gcp.zone),
+        ],
+    );
+
+    format!("maglev \"{name}\" {{\n\n{node_block}\n{node_pool_block}\n{gcp_block}\n}}\n")
+}
+
+fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if Path::new(config_path).exists() {
+        eprintln!("error: '{config_path}' already exists");
+        std::process::exit(1);
+    }
+
+    let name = Path::new(config_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("maglev")
+        .to_string();
+
+    let client_email = env::var("MAGLEV_CLIENT_EMAIL")
+        .map_err(|_| "MAGLEV_CLIENT_EMAIL environment variable is not set")?;
+
+    let derived_project = client_email
+        .split('@')
+        .nth(1)
+        .and_then(|domain| domain.split('.').next())
+        .unwrap_or("my-project")
+        .to_string();
+
+    let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
+    let private_key =
+        env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| ".keys/private_key.pem".to_string());
+    let instance_name =
+        env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-vm-{name}"));
+    let machine_type = env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
+    let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
+    let boot_disk_image =
+        env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
+    let boot_disk_size_gb =
+        env::var("MAGLEV_BOOT_DISK_SIZE_GB").unwrap_or_else(|_| "50".to_string());
+    let ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
+        .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
+    let startup_script_path =
+        env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
+
+    let config = format_config(
+        &name,
+        &NodeConfig {
+            boot_disk_image: &boot_disk_image,
+            boot_disk_size_gb: &boot_disk_size_gb,
+            instance_name: &instance_name,
+            machine_type: &machine_type,
+            ssh_public_key_path: &ssh_public_key_path,
+            startup_script_path: &startup_script_path,
+        },
+        &GcpConfig {
+            client_email: &client_email,
+            private_key: &private_key,
+            project_id: &project_id,
+            zone: &zone,
+        },
+    );
+
+    fs::write(config_path, &config)
+        .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
+
+    println!("✓ Config written to: {config_path}");
     Ok(())
 }
