@@ -114,7 +114,6 @@ fn public_key_info(
 // SSH key / startup-script helpers
 // ---------------------------------------------------------------------------
 
-/// Read the public key at `path`, expanding a leading `~` to `$HOME`.
 fn read_ssh_public_key(path: &str) -> Result<String, Box<dyn std::error::Error>> {
     let expanded = expand_tilde(path);
     let content = fs::read_to_string(&expanded)
@@ -122,20 +121,23 @@ fn read_ssh_public_key(path: &str) -> Result<String, Box<dyn std::error::Error>>
     Ok(content.trim().to_string())
 }
 
-/// Read the startup script at `path`; fall back to a sensible built-in default
-/// when the file does not exist.
 fn read_startup_script(path: &str) -> String {
     let expanded = expand_tilde(path);
-    fs::read_to_string(&expanded)
-        .unwrap_or_else(|_| "#!/bin/bash\nset -e\napt-get update\ncurl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/cisak-v0.1.11-linux-amd64.tar.gz | tar -xz\ninstall -m 755 -o root -g root cisak /usr/local/bin/cisak\ncisak generate\ncisak install -y".to_string())
+    fs::read_to_string(&expanded).unwrap_or_else(|_| {
+        "#!/bin/bash\nset -e\napt-get update\n\
+         curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/\
+         cisak-v0.1.11-linux-amd64.tar.gz | tar -xz\n\
+         install -m 755 -o root -g root cisak /usr/local/bin/cisak\n\
+         cisak generate\ncisak install -y"
+            .to_string()
+    })
 }
 
 fn expand_tilde(path: &str) -> String {
-    // Strip the leading `~` only when followed by a separator or end-of-string
     let after_tilde = if path == "~" {
         ""
     } else if path.starts_with("~/") || path.starts_with("~\\") {
-        &path[1..] // keep the separator so joining is clean
+        &path[1..]
     } else {
         return path.to_string();
     };
@@ -144,29 +146,17 @@ fn expand_tilde(path: &str) -> String {
     format!("{}{}", home, after_tilde)
 }
 
-/// Cross-platform home directory lookup.
 fn home_dir() -> Option<String> {
-    // Unix: $HOME
-    // Windows: %USERPROFILE%, then %HOMEDRIVE%%HOMEPATH%
     env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
         .ok()
         .or_else(|| {
-            // Last-resort Windows fallback
             let drive = env::var("HOMEDRIVE").ok()?;
             let path = env::var("HOMEPATH").ok()?;
             Some(format!("{}{}", drive, path))
         })
 }
 
-/// Map a bare image family name to the full GCP image URI used by the API.
-///
-/// | Input                    | Resolved                                                             |
-/// |--------------------------|----------------------------------------------------------------------|
-/// | `ubuntu-2404-lts-amd64`  | `projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64` |
-/// | `debian-12`              | `projects/debian-cloud/global/images/family/debian-12`               |
-/// | `cos-stable`             | `projects/cos-cloud/global/images/family/cos-stable`                 |
-/// | anything containing `/`  | returned as-is (already a full path)                                 |
 fn resolve_image(image: &str) -> String {
     if image.contains('/') {
         return image.to_string();
@@ -194,7 +184,6 @@ fn resolve_image(image: &str) -> String {
 fn load_google_application_credentials()
 -> Option<Result<(String, String), Box<dyn std::error::Error>>> {
     let path = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()?;
-
     println!("GOOGLE_APPLICATION_CREDENTIALS = {path}");
 
     let result = (|| {
@@ -266,54 +255,102 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
 }
 
 // ---------------------------------------------------------------------------
-// `generate` subcommand
+// HCL block renderer
+//
+//   render_block(2, "node", &[("machine_type", "e2-medium"), ...])
+//
+//   →   node {
+//         machine_type = "e2-medium"
+//         ...
+//       }
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+fn render_block(indent: usize, block_name: &str, fields: &[(&str, &str)]) -> String {
+    let outer = " ".repeat(indent);
+    let inner = " ".repeat(indent + 2);
+    let max_key = fields.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+
+    let mut out = format!("{outer}{block_name} {{\n");
+    for (key, value) in fields {
+        let pad = " ".repeat(max_key - key.len() + 1);
+        out.push_str(&format!("{inner}{key}{pad}= \"{value}\"\n"));
+    }
+    out.push_str(&format!("{outer}}}\n"));
+    out
+}
+
+// ---------------------------------------------------------------------------
+// `generate` subcommand
+// ---------------------------------------------------------------------------
+//
+// Output format:
+//
+//   maglev "prod" {
+//
+//     node {
+//       boot_disk_image     = "ubuntu-2404-lts-amd64"
+//       boot_disk_size_gb   = "50"
+//       instance_name       = "maglev-vm-prod"
+//       machine_type        = "e2-medium"
+//       ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+//       startup_script_path = "./startup.sh"
+//     }
+//
+//     node_pool {
+//       name = "prod"
+//     }
+//
+//     gcp_config {
+//       client_email = "sa@project.iam.gserviceaccount.com"
+//       private_key  = ".keys/private_key.pem"
+//       project_id   = "my-project"
+//       zone         = "europe-north1-a"
+//     }
+//
+//   }
+
 fn format_config(
     name: &str,
+    // ── node ──────────────────────────────────────────────────────────────────
     boot_disk_image: &str,
     boot_disk_size_gb: &str,
-    client_email: &str,
     instance_name: &str,
     machine_type: &str,
-    private_key: &str,
-    project_id: &str,
     ssh_public_key_path: &str,
     startup_script_path: &str,
+    // ── gcp_config ────────────────────────────────────────────────────────────
+    client_email: &str,
+    private_key: &str,
+    project_id: &str,
     zone: &str,
 ) -> String {
-    // Fields are listed alphabetically so the output is deterministic.
-    let maglev_fields: &[(&str, &str)] = &[
-        ("boot_disk_image", boot_disk_image),
-        ("boot_disk_size_gb", boot_disk_size_gb),
-        ("client_email", client_email),
-        ("instance_name", instance_name),
-        ("machine_type", machine_type),
-        ("private_key", private_key),
-        ("project_id", project_id),
-        ("ssh_public_key_path", ssh_public_key_path),
-        ("startup_script_path", startup_script_path),
-        ("zone", zone),
-    ];
+    let node = render_block(
+        2,
+        "node",
+        &[
+            ("boot_disk_image", boot_disk_image),
+            ("boot_disk_size_gb", boot_disk_size_gb),
+            ("instance_name", instance_name),
+            ("machine_type", machine_type),
+            ("ssh_public_key_path", ssh_public_key_path),
+            ("startup_script_path", startup_script_path),
+        ],
+    );
 
-    let max_key = maglev_fields
-        .iter()
-        .map(|(k, _)| k.len())
-        .max()
-        .unwrap_or(0);
+    let node_pool = render_block(2, "node_pool", &[("name", name)]);
 
-    let maglev_body: String = maglev_fields
-        .iter()
-        .map(|(key, value)| {
-            let pad = " ".repeat(max_key - key.len() + 1);
-            format!("    {key}{pad}= \"{value}\"\n")
-        })
-        .collect();
+    let gcp_config = render_block(
+        2,
+        "gcp_config",
+        &[
+            ("client_email", client_email),
+            ("private_key", private_key),
+            ("project_id", project_id),
+            ("zone", zone),
+        ],
+    );
 
-    format!(
-        "kubernetes_instance = {{\n  name    = \"{name}\"\n\n  maglev = {{\n{maglev_body}  }}\n}}\n"
-    )
+    format!("maglev \"{name}\" {{\n\n{node}\n{node_pool}\n{gcp_config}\n}}\n")
 }
 
 fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -322,14 +359,11 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         std::process::exit(1);
     }
 
-    // Derive the logical name from the file stem (e.g. "prod" from "prod.maglev").
     let name = Path::new(config_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("maglev")
         .to_string();
-
-    // ── All values come from env vars; MAGLEV_CLIENT_EMAIL is required ───────
 
     let client_email = env::var("MAGLEV_CLIENT_EMAIL")
         .map_err(|_| "MAGLEV_CLIENT_EMAIL environment variable is not set")?;
@@ -342,42 +376,32 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         .to_string();
 
     let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
-
     let private_key =
         env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| ".keys/private_key.pem".to_string());
-
     let instance_name =
         env::var("MAGLEV_INSTANCE_NAME").unwrap_or_else(|_| format!("maglev-vm-{name}"));
-
     let machine_type = env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
-
     let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
-
     let boot_disk_image =
         env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
-
     let boot_disk_size_gb =
         env::var("MAGLEV_BOOT_DISK_SIZE_GB").unwrap_or_else(|_| "50".to_string());
-
     let ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
         .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
-
     let startup_script_path =
         env::var("MAGLEV_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup.sh".to_string());
-
-    // ── Render & write ────────────────────────────────────────────────────────
 
     let config = format_config(
         &name,
         &boot_disk_image,
         &boot_disk_size_gb,
-        &client_email,
         &instance_name,
         &machine_type,
-        &private_key,
-        &project_id,
         &ssh_public_key_path,
         &startup_script_path,
+        &client_email,
+        &private_key,
+        &project_id,
         &zone,
     );
 
@@ -385,7 +409,6 @@ fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
 
     println!("✓ Config written to: {config_path}");
-
     Ok(())
 }
 
@@ -408,8 +431,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // ── Public key & fingerprint ─────────────────────────────────────────────
-
     let (public_cert_pem, _) = public_key_info(&private_key, &client_email)?;
 
     println!("\n── Public certificate (RSA_X509_PEM) ──────────────────────────────────\n");
@@ -422,8 +443,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
     println!("        --iam-account={client_email}");
     println!("  • Verify locally with:");
     println!("      openssl x509 -in cert.pem -noout -fingerprint -sha256");
-
-    // ── Credentials JSON ─────────────────────────────────────────────────────
 
     println!("\n── Credentials ─────────────────────────────────────────────────────────\n");
 
@@ -438,8 +457,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         println!("{json_str}");
     }
 
-    // ── Save credentials ─────────────────────────────────────────────────────
-
     if prompt_yes_no("\nSave credentials to file?") {
         let filename = format!(
             "maglev-credentials-{}.json",
@@ -450,8 +467,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Credentials saved to: {filename}");
         println!("⚠ Keep this file secure!");
     }
-
-    // ── Create a VM instance ─────────────────────────────────────────────────
 
     if prompt_yes_no("\nCreate a VM instance now?") {
         let project_id = if let Ok(p) = env::var("MAGLEV_PROJECT_ID") {
@@ -696,7 +711,7 @@ fn create_vm(
             "autoDelete": true,
             "initializeParams": {
                 "sourceImage": resolve_image(boot_disk_image),
-                "diskSizeGb": boot_disk_size_gb.to_string(),
+                "diskSizeGb":  boot_disk_size_gb.to_string(),
             }
         }],
         "networkInterfaces": [{
@@ -706,9 +721,7 @@ fn create_vm(
                 "name": "External NAT",
             }]
         }],
-        "metadata": {
-            "items": metadata_items,
-        }
+        "metadata": { "items": metadata_items }
     });
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -734,6 +747,19 @@ fn create_vm(
 
 // ---------------------------------------------------------------------------
 // .maglev config parser
+//
+// Supports the nested HCL-like structure produced by `format_config`:
+//
+//   maglev "prod" {
+//     node       { ... }
+//     node_pool  { ... }
+//     gcp_config { ... }
+//   }
+//
+// Keys from nested blocks are stored as "<block>.<key>", e.g.
+//   "node.machine_type", "gcp_config.project_id", "node_pool.name".
+//
+// The maglev label itself is stored as "name".
 // ---------------------------------------------------------------------------
 
 fn parse_maglev_config(
@@ -741,24 +767,71 @@ fn parse_maglev_config(
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
     let mut map = std::collections::HashMap::new();
 
+    // A stack of block names; the outermost entry is always "maglev".
+    let mut block_stack: Vec<String> = Vec::new();
+
     for raw_line in content.lines() {
         let line = raw_line.trim();
 
-        if line.is_empty() || line == "}" || line.ends_with('{') {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
+        // ── Close a block ────────────────────────────────────────────────────
+        if line == "}" {
+            block_stack.pop();
+            continue;
+        }
+
+        // ── Open a block ─────────────────────────────────────────────────────
+        if line.ends_with('{') {
+            let header = line.trim_end_matches('{').trim();
+
+            if header.starts_with("maglev") {
+                // Extract the optional label: maglev "prod" → "prod"
+                let label = header
+                    .splitn(2, '"')
+                    .nth(1)
+                    .and_then(|s| s.split('"').next())
+                    .unwrap_or("")
+                    .to_string();
+
+                if !label.is_empty() {
+                    map.insert("name".to_string(), label);
+                }
+
+                block_stack.push("maglev".to_string());
+            } else {
+                // Bare block names: node, node_pool, gcp_config, …
+                block_stack.push(header.to_string());
+            }
+
+            continue;
+        }
+
+        // ── key = "value" ────────────────────────────────────────────────────
         let Some(eq_pos) = line.find('=') else {
             continue;
         };
 
-        let key = line[..eq_pos].trim().to_string();
+        let key = line[..eq_pos].trim();
         let value_part = line[eq_pos + 1..].trim();
 
-        if value_part.starts_with('"') && value_part.ends_with('"') && value_part.len() >= 2 {
-            let value = value_part[1..value_part.len() - 1].to_string();
-            map.insert(key, value);
+        if !(value_part.starts_with('"') && value_part.ends_with('"') && value_part.len() >= 2) {
+            continue;
         }
+
+        let value = value_part[1..value_part.len() - 1].to_string();
+
+        // Prefix with the innermost non-maglev block, if any.
+        let full_key = block_stack
+            .iter()
+            .filter(|b| b.as_str() != "maglev")
+            .last()
+            .map(|b| format!("{b}.{key}"))
+            .unwrap_or_else(|| key.to_string());
+
+        map.insert(full_key, value);
     }
 
     Ok(map)
@@ -777,6 +850,7 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = parse_maglev_config(&content)?;
 
+    // Helper — look up a dotted key and give a clear error when it is absent.
     let require = |key: &str| -> Result<String, Box<dyn std::error::Error>> {
         config
             .get(key)
@@ -784,29 +858,38 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or_else(|| format!("Missing required field '{key}' in {config_path}").into())
     };
 
-    let client_email = require("client_email")?;
-    let instance_name = require("instance_name")?;
-    let machine_type = require("machine_type")?;
-    let project_id = require("project_id")?;
-    let zone = require("zone")?;
-    let boot_disk_image = require("boot_disk_image")?;
-    let private_key_path = require("private_key")?;
-    let ssh_public_key_path = require("ssh_public_key_path")?;
-    let startup_script_path = require("startup_script_path")?;
-
-    let boot_disk_size_gb: u64 = require("boot_disk_size_gb")?
+    // ── node block ───────────────────────────────────────────────────────────
+    let boot_disk_image = require("node.boot_disk_image")?;
+    let boot_disk_size_gb: u64 = require("node.boot_disk_size_gb")?
         .parse()
-        .map_err(|_| "Field 'boot_disk_size_gb' must be a positive integer")?;
+        .map_err(|_| "Field 'node.boot_disk_size_gb' must be a positive integer")?;
+    let instance_name = require("node.instance_name")?;
+    let machine_type = require("node.machine_type")?;
+    let ssh_public_key_path = require("node.ssh_public_key_path")?;
+    let startup_script_path = require("node.startup_script_path")?;
 
+    // ── node_pool block ──────────────────────────────────────────────────────
+    let _pool_name = config
+        .get("node_pool.name")
+        .cloned()
+        .unwrap_or_else(|| config.get("name").cloned().unwrap_or_default());
+
+    // ── gcp_config block ─────────────────────────────────────────────────────
+    let client_email = require("gcp_config.client_email")?;
+    let private_key_path = require("gcp_config.private_key")?;
+    let project_id = require("gcp_config.project_id")?;
+    let zone = require("gcp_config.zone")?;
+
+    // ── Load the private key from disk ───────────────────────────────────────
     let expanded_key_path = expand_tilde(&private_key_path);
     let private_key = fs::read_to_string(&expanded_key_path)
         .map_err(|e| format!("Cannot read private key from '{expanded_key_path}': {e}"))?;
 
+    // ── SSH public key ───────────────────────────────────────────────────────
     let ssh_key_content = read_ssh_public_key(&ssh_public_key_path).unwrap_or_else(|e| {
         eprintln!("  ⚠ Could not read SSH public key: {e}");
         String::new()
     });
-
     let ssh_keys_metadata = if ssh_key_content.is_empty() {
         String::new()
     } else {
@@ -815,6 +898,7 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let startup_script = read_startup_script(&startup_script_path);
 
+    // ── Summary ──────────────────────────────────────────────────────────────
     println!("\n── Instance details ────────────────────────────────────────────────────");
     println!("  Project:           {project_id}");
     println!("  Zone:              {zone}");
