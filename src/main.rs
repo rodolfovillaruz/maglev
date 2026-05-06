@@ -127,7 +127,7 @@ fn read_ssh_public_key(path: &str) -> Result<String, Box<dyn std::error::Error>>
 fn read_startup_script(path: &str) -> String {
     let expanded = expand_tilde(path);
     fs::read_to_string(&expanded)
-        .unwrap_or_else(|_| "#!/bin/bash\nset -e\napt-get update\ncurl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.10/cisak-v0.1.10-linux-amd64.tar.gz | tar -xz\ninstall -m 755 -o root -g root cisak /usr/local/bin/cisak\ncisak generate\ncisak install -y".to_string())
+        .unwrap_or_else(|_| "#!/bin/bash\nset -e\napt-get update\ncurl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/cisak-v0.1.11-linux-amd64.tar.gz | tar -xz\ninstall -m 755 -o root -g root cisak /usr/local/bin/cisak\ncisak generate\ncisak install -y".to_string())
 }
 
 fn expand_tilde(path: &str) -> String {
