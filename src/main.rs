@@ -539,11 +539,7 @@ fn create_vm(
             }
         }],
         "networkInterfaces": [{
-            "network": "global/networks/default",
-            "accessConfigs": [{
-                "type": "ONE_TO_ONE_NAT",
-                "name": "External NAT",
-            }]
+            "network": "global/networks/default"
         }],
         "metadata": { "items": metadata_items }
     });
@@ -637,10 +633,10 @@ fn get_vm_ip(
         .into());
     }
 
-    body["networkInterfaces"][0]["accessConfigs"][0]["natIP"]
+    body["networkInterfaces"][0]["networkIP"]
         .as_str()
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("No external (NAT) IP found for instance '{instance_name}'").into())
+        .ok_or_else(|| format!("No internal IP found for instance '{instance_name}'").into())
 }
 
 // ---------------------------------------------------------------------------
