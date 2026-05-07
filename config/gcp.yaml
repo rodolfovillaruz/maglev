@@ -1,0 +1,51 @@
+gcp:
+  group:
+  - name: control-plane
+    node:
+    - maglev-cp-alpha
+    - maglev-cp-beta
+    - maglev-cp-gamma
+  - name: worker
+    node:
+    - maglev-worker-alpha
+    - maglev-worker-beta
+    - maglev-worker-gamma
+    - maglev-worker-delta
+    - maglev-worker-epsilon
+  generics:
+  - name: default
+    config:
+    - ssh-public-key: ~/.ssh/id_ed25519.pub
+      script: |-
+        #!/bin/bash
+        set -e
+
+        apt-get update
+        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/
+        cisak-v0.1.11-linux-amd64.tar.gz | tar -xz
+        install -m 755 -o root -g root cisak /usr/local/bin/cisak
+        cisak generate
+        cisak install "path/to/private-key.pem"
+  specs:
+  - name: control-plane
+    config:
+    - machine-type: e2-standard-2
+      boot-disk-image: ubuntu-2404-lts-amd64
+      boot-disk-size: 20
+  - name: worker
+    config:
+    - machine-type: e2-standard-2
+      boot-disk-image: ubuntu-2404-lts-amd64
+      boot-disk-size: 50
+  rules:
+  - group: control-plane
+    generics: default
+    specs: control-plane
+  - group: worker
+    generics: default
+    specs: worker
+  credentials:
+    client-email: my-service-account@my-project.iam.gserviceaccount.com
+    private-key: "path/to/private-key.pem"
+    project-id: my-project
+    zone: us-central1-a
