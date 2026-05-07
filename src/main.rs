@@ -74,19 +74,34 @@ struct ServiceAccountCredentials {
 // Parsed config types
 // ---------------------------------------------------------------------------
 
+/// A single VM node.
+///
+/// For **control-plane** nodes the three `Option` fields carry that node's own
+/// machine configuration.  For **worker** nodes those fields are `None` and the
+/// values are inherited from the enclosing [`NodePoolEntry`].
 #[derive(Debug, Clone)]
 struct NodeEntry {
     instance_name: String,
     ssh_public_key_path: String,
     startup_script_path: String,
+    /// Per-node override — control-plane only.
+    boot_disk_image: Option<String>,
+    /// Per-node override — control-plane only.
+    boot_disk_size_gb: Option<u64>,
+    /// Per-node override — control-plane only.
+    machine_type: Option<String>,
 }
 
+/// Shared pool configuration.  Worker nodes live *inside* this struct so that
+/// the HCL they are serialised into is nested under the `node_pool` block.
 #[derive(Debug, Clone)]
 struct NodePoolEntry {
     boot_disk_image: String,
     boot_disk_size_gb: u64,
     machine_type: String,
     name: String,
+    /// Worker nodes that belong to this pool (and inherit its machine config).
+    workers: Vec<NodeEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,8 +115,9 @@ struct GcpEntry {
 #[derive(Debug)]
 struct MaglevConfig {
     name: String,
+    /// Each control-plane node carries its own machine configuration.
     control_planes: Vec<NodeEntry>,
-    workers: Vec<NodeEntry>,
+    /// Pool configuration; worker nodes are nested inside.
     node_pool: NodePoolEntry,
     gcp: GcpEntry,
 }
@@ -722,6 +738,35 @@ fn block_attrs(body: &hcl::Body) -> HashMap<String, String> {
         .collect()
 }
 
+/// Parse a `node "worker" "<name>" { … }` block that appears **inside** a
+/// `node_pool` block.  Workers inherit machine config from the pool, so those
+/// fields are left as `None`.
+fn parse_worker_node_block(block: &hcl::Block) -> Result<NodeEntry, Box<dyn std::error::Error>> {
+    let labels = block.labels();
+    let instance_name = labels
+        .get(1)
+        .map(|l| l.as_str().to_string())
+        .ok_or("Worker 'node' block inside node_pool is missing its instance-name label")?;
+
+    let attrs = block_attrs(block.body());
+
+    Ok(NodeEntry {
+        instance_name,
+        ssh_public_key_path: attrs
+            .get("ssh_public_key_path")
+            .cloned()
+            .unwrap_or_else(|| "~/.ssh/id_ed25519.pub".to_string()),
+        startup_script_path: attrs
+            .get("startup_script_path")
+            .cloned()
+            .unwrap_or_else(|| "./startup.sh".to_string()),
+        // Workers inherit machine config from node_pool — not stored on the node.
+        boot_disk_image: None,
+        boot_disk_size_gb: None,
+        machine_type: None,
+    })
+}
+
 fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error::Error>> {
     let body = hcl::parse(content).map_err(|e| format!("HCL parse error: {e}"))?;
 
@@ -737,71 +782,84 @@ fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error
         .unwrap_or_else(|| "maglev".to_string());
 
     let mut control_planes: Vec<NodeEntry> = Vec::new();
-    let mut workers: Vec<NodeEntry> = Vec::new();
     let mut node_pool: Option<NodePoolEntry> = None;
     let mut gcp: Option<GcpEntry> = None;
 
     for block in maglev_block.body().blocks() {
         match block.identifier() {
+            // Only control-plane nodes appear at the top level.
+            // Worker nodes are nested inside node_pool (see below).
             "node" => {
                 let labels = block.labels();
                 let role = labels
                     .first()
                     .map(|l| l.as_str())
                     .ok_or("'node' block is missing its role label")?;
-                let instance_name =
-                    labels
-                        .get(1)
-                        .map(|l| l.as_str().to_string())
-                        .ok_or_else(|| {
-                            format!("'node \"{role}\"' block is missing its instance-name label")
-                        })?;
+
+                if role != "control_plane" {
+                    return Err(format!(
+                        "Top-level 'node \"{role}\"' block is not allowed; \
+                         only 'control_plane' nodes live at the top level — \
+                         worker nodes must be nested inside a 'node_pool' block"
+                    )
+                    .into());
+                }
+
+                let instance_name = labels
+                    .get(1)
+                    .map(|l| l.as_str().to_string())
+                    .ok_or("'node \"control_plane\"' block is missing its instance-name label")?;
 
                 let attrs = block_attrs(block.body());
 
-                let entry = NodeEntry {
+                control_planes.push(NodeEntry {
                     instance_name,
                     ssh_public_key_path: attrs
                         .get("ssh_public_key_path")
                         .cloned()
                         .unwrap_or_else(|| "~/.ssh/id_ed25519.pub".to_string()),
-                    startup_script_path: attrs.get("startup_script_path").cloned().unwrap_or_else(
-                        || match role {
-                            "control_plane" => "./startup-cp.sh".to_string(),
-                            _ => "./startup.sh".to_string(),
-                        },
-                    ),
-                };
-
-                match role {
-                    "control_plane" => control_planes.push(entry),
-                    "worker" => workers.push(entry),
-                    other => {
-                        return Err(format!(
-                            "Unknown node role '{other}'; expected 'control_plane' or 'worker'"
-                        )
-                        .into());
-                    }
-                }
+                    startup_script_path: attrs
+                        .get("startup_script_path")
+                        .cloned()
+                        .unwrap_or_else(|| "./startup-cp.sh".to_string()),
+                    boot_disk_image: attrs.get("boot_disk_image").cloned(),
+                    boot_disk_size_gb: attrs.get("boot_disk_size_gb").and_then(|v| v.parse().ok()),
+                    machine_type: attrs.get("machine_type").cloned(),
+                });
             }
 
             "node_pool" => {
                 let attrs = block_attrs(block.body());
-                let size: u64 = attrs
+                let pool_size: u64 = attrs
                     .get("boot_disk_size_gb")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(50);
+
+                // Parse worker nodes nested inside the node_pool block.
+                let mut workers: Vec<NodeEntry> = Vec::new();
+                for inner in block.body().blocks() {
+                    if inner.identifier() == "node" {
+                        workers.push(parse_worker_node_block(inner)?);
+                    } else {
+                        eprintln!(
+                            "  ⚠  Unknown block '{}' inside node_pool — skipping.",
+                            inner.identifier()
+                        );
+                    }
+                }
+
                 node_pool = Some(NodePoolEntry {
                     boot_disk_image: attrs
                         .get("boot_disk_image")
                         .cloned()
                         .unwrap_or_else(|| "ubuntu-2404-lts-amd64".to_string()),
-                    boot_disk_size_gb: size,
+                    boot_disk_size_gb: pool_size,
                     machine_type: attrs
                         .get("machine_type")
                         .cloned()
                         .unwrap_or_else(|| "e2-medium".to_string()),
                     name: attrs.get("name").cloned().unwrap_or_else(|| name.clone()),
+                    workers,
                 });
             }
 
@@ -830,39 +888,72 @@ fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error
     if control_planes.is_empty() {
         return Err("Config contains no 'node \"control_plane\" …' blocks".into());
     }
-    if workers.is_empty() {
-        return Err("Config contains no 'node \"worker\" …' blocks".into());
+
+    let pool = node_pool.ok_or("Missing 'node_pool' block in config")?;
+
+    if pool.workers.is_empty() {
+        return Err("node_pool contains no 'node \"worker\" …' blocks".into());
     }
 
     Ok(MaglevConfig {
         name,
         control_planes,
-        workers,
-        node_pool: node_pool.ok_or("Missing 'node_pool' block in config")?,
+        node_pool: pool,
         gcp: gcp.ok_or("Missing 'gcp_config' block in config")?,
     })
 }
 
 // ---------------------------------------------------------------------------
-// .maglev HCL config — generator
+// .maglev HCL config — serialiser
 // ---------------------------------------------------------------------------
 
-fn build_node_block(role: &str, entry: &NodeEntry) -> hcl::Block {
+/// Build a top-level `node "control_plane" "<name>" { … }` block.
+/// Every control-plane node includes its own machine configuration.
+fn build_control_plane_block(entry: &NodeEntry) -> hcl::Block {
+    let mut builder = hcl::Block::builder("node")
+        .add_label("control_plane")
+        .add_label(&entry.instance_name)
+        .add_attribute(("ssh_public_key_path", entry.ssh_public_key_path.as_str()))
+        .add_attribute(("startup_script_path", entry.startup_script_path.as_str()));
+
+    if let Some(ref img) = entry.boot_disk_image {
+        builder = builder.add_attribute(("boot_disk_image", img.as_str()));
+    }
+    if let Some(size) = entry.boot_disk_size_gb {
+        builder = builder.add_attribute(("boot_disk_size_gb", size));
+    }
+    if let Some(ref mt) = entry.machine_type {
+        builder = builder.add_attribute(("machine_type", mt.as_str()));
+    }
+
+    builder.build()
+}
+
+/// Build a `node "worker" "<name>" { … }` block for use **inside** a
+/// `node_pool` block.  Machine config is omitted — it is inherited from the
+/// enclosing pool.
+fn build_worker_block(entry: &NodeEntry) -> hcl::Block {
     hcl::Block::builder("node")
-        .add_label(role)
+        .add_label("worker")
         .add_label(&entry.instance_name)
         .add_attribute(("ssh_public_key_path", entry.ssh_public_key_path.as_str()))
         .add_attribute(("startup_script_path", entry.startup_script_path.as_str()))
         .build()
 }
 
+/// Build the `node_pool { … }` block, with worker `node` blocks nested inside.
 fn build_node_pool_block(pool: &NodePoolEntry) -> hcl::Block {
-    hcl::Block::builder("node_pool")
+    let mut builder = hcl::Block::builder("node_pool")
         .add_attribute(("boot_disk_image", pool.boot_disk_image.as_str()))
         .add_attribute(("boot_disk_size_gb", pool.boot_disk_size_gb))
         .add_attribute(("machine_type", pool.machine_type.as_str()))
-        .add_attribute(("name", pool.name.as_str()))
-        .build()
+        .add_attribute(("name", pool.name.as_str()));
+
+    for worker in &pool.workers {
+        builder = builder.add_block(build_worker_block(worker));
+    }
+
+    builder.build()
 }
 
 fn build_gcp_config_block(gcp: &GcpEntry) -> hcl::Block {
@@ -877,13 +968,14 @@ fn build_gcp_config_block(gcp: &GcpEntry) -> hcl::Block {
 fn serialize_config(cfg: &MaglevConfig) -> Result<String, Box<dyn std::error::Error>> {
     let mut inner = hcl::Body::builder();
 
+    // Control-plane nodes — each with its own machine config, at the top level.
     for entry in &cfg.control_planes {
-        inner = inner.add_block(build_node_block("control_plane", entry));
+        inner = inner.add_block(build_control_plane_block(entry));
     }
-    for entry in &cfg.workers {
-        inner = inner.add_block(build_node_block("worker", entry));
-    }
+
+    // node_pool — contains pool-level machine config + nested worker nodes.
     inner = inner.add_block(build_node_pool_block(&cfg.node_pool));
+
     inner = inner.add_block(build_gcp_config_block(&cfg.gcp));
 
     let maglev_block = hcl::Block::builder("maglev")
@@ -934,18 +1026,34 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
     let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
     let private_key =
         env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| ".keys/private_key.pem".to_string());
-    let machine_type = env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
     let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "europe-north1-a".to_string());
-    let boot_disk_image =
-        env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
-    let boot_disk_size_gb: u64 = env::var("MAGLEV_BOOT_DISK_SIZE_GB")
+
+    // --- Control-plane machine config (each CP node gets its own copy) ---
+    let cp_machine_type =
+        env::var("MAGLEV_CP_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
+    let cp_boot_disk_image = env::var("MAGLEV_CP_BOOT_DISK_IMAGE")
+        .unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
+    let cp_boot_disk_size_gb: u64 = env::var("MAGLEV_CP_BOOT_DISK_SIZE_GB")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
-    let ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
+    let cp_ssh_public_key_path = env::var("MAGLEV_CP_SSH_PUBLIC_KEY_PATH")
+        .or_else(|_| env::var("MAGLEV_SSH_PUBLIC_KEY_PATH"))
         .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
     let cp_startup_script_path =
         env::var("MAGLEV_CP_STARTUP_SCRIPT_PATH").unwrap_or_else(|_| "./startup-cp.sh".to_string());
+
+    // --- Worker / pool machine config ---
+    let pool_machine_type =
+        env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
+    let pool_boot_disk_image =
+        env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
+    let pool_boot_disk_size_gb: u64 = env::var("MAGLEV_BOOT_DISK_SIZE_GB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let worker_ssh_public_key_path = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
+        .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
     let worker_startup_script_path = env::var("MAGLEV_WORKER_STARTUP_SCRIPT_PATH")
         .unwrap_or_else(|_| "./startup.sh".to_string());
 
@@ -960,33 +1068,41 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
         ]
     });
 
+    // Each control-plane node gets its own machine configuration block.
     let control_planes: Vec<NodeEntry> = cp_names
         .iter()
         .map(|n| NodeEntry {
             instance_name: n.clone(),
-            ssh_public_key_path: ssh_public_key_path.clone(),
+            ssh_public_key_path: cp_ssh_public_key_path.clone(),
             startup_script_path: cp_startup_script_path.clone(),
+            boot_disk_image: Some(cp_boot_disk_image.clone()),
+            boot_disk_size_gb: Some(cp_boot_disk_size_gb),
+            machine_type: Some(cp_machine_type.clone()),
         })
         .collect();
 
+    // Workers only carry connectivity info; machine config is on the pool.
     let workers: Vec<NodeEntry> = worker_names
         .iter()
         .map(|n| NodeEntry {
             instance_name: n.clone(),
-            ssh_public_key_path: ssh_public_key_path.clone(),
+            ssh_public_key_path: worker_ssh_public_key_path.clone(),
             startup_script_path: worker_startup_script_path.clone(),
+            boot_disk_image: None,
+            boot_disk_size_gb: None,
+            machine_type: None,
         })
         .collect();
 
     let cfg = MaglevConfig {
         name: name.clone(),
         control_planes,
-        workers,
         node_pool: NodePoolEntry {
-            boot_disk_image,
-            boot_disk_size_gb,
-            machine_type,
+            boot_disk_image: pool_boot_disk_image,
+            boot_disk_size_gb: pool_boot_disk_size_gb,
+            machine_type: pool_machine_type,
             name: name.clone(),
+            workers,
         },
         gcp: GcpEntry {
             client_email,
@@ -1011,7 +1127,8 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
     );
     println!(
         "  worker nodes        : {}",
-        cfg.workers
+        cfg.node_pool
+            .workers
             .iter()
             .map(|n| n.instance_name.as_str())
             .collect::<Vec<_>>()
@@ -1046,16 +1163,13 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let pool = &cfg.node_pool;
     let gcp = &cfg.gcp;
 
-    println!("\n── Shared settings ─────────────────────────────────────────────────────");
+    println!("\n── GCP settings ────────────────────────────────────────────────────────");
     println!("  Project:           {}", gcp.project_id);
     println!("  Zone:              {}", gcp.zone);
-    println!("  Machine type:      {}", pool.machine_type);
-    println!("  Boot disk image:   {}", pool.boot_disk_image);
-    println!("  Boot disk size:    {} GB", pool.boot_disk_size_gb);
     println!("  Service account:   {}", gcp.client_email);
 
     println!(
-        "\n── Control-plane nodes ({}) ─────────────────────────────────────────────",
+        "\n── Control-plane nodes ({}) — individual machine config ─────────────────",
         cfg.control_planes.len()
     );
     for cp in &cfg.control_planes {
@@ -1063,22 +1177,40 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "  {}  (ssh key: {})",
             cp.instance_name, cp.ssh_public_key_path
         );
-        println!("    startup: {}", cp.startup_script_path);
+        println!(
+            "    machine type    : {}",
+            cp.machine_type.as_deref().unwrap_or("(none specified)")
+        );
+        println!(
+            "    boot disk image : {}",
+            cp.boot_disk_image.as_deref().unwrap_or("(none specified)")
+        );
+        println!(
+            "    boot disk size  : {} GB",
+            cp.boot_disk_size_gb
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "(none specified)".to_string())
+        );
+        println!("    startup script  : {}", cp.startup_script_path);
     }
 
     println!(
-        "\n── Worker nodes ({}) ────────────────────────────────────────────────────",
-        cfg.workers.len()
+        "\n── node_pool '{}' — {} workers ──────────────────────────────────────────",
+        pool.name,
+        pool.workers.len()
     );
-    for w in &cfg.workers {
+    println!("  machine type    : {}", pool.machine_type);
+    println!("  boot disk image : {}", pool.boot_disk_image);
+    println!("  boot disk size  : {} GB", pool.boot_disk_size_gb);
+    for w in &pool.workers {
         println!(
-            "  {}  (ssh key: {})",
+            "  worker  {}  (ssh key: {})",
             w.instance_name, w.ssh_public_key_path
         );
-        println!("    startup: {}", w.startup_script_path);
+        println!("    startup script: {}", w.startup_script_path);
     }
 
-    let total = cfg.control_planes.len() + cfg.workers.len();
+    let total = cfg.control_planes.len() + pool.workers.len();
     if !prompt_yes_no(&format!("\nProceed with creating {total} VM instances?")) {
         println!("Aborted.");
         return Ok(());
@@ -1096,11 +1228,20 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Exchanging JWT for OAuth2 access token...");
     let access_token = get_access_token(&jwt)?;
 
+    // Create control-plane nodes using each node's own machine configuration.
     for cp in &cfg.control_planes {
         println!(
             "\n  ── Creating control-plane node ({}) ──",
             cp.instance_name
         );
+
+        let machine_type = cp.machine_type.as_deref().unwrap_or(&pool.machine_type);
+        let boot_disk_image = cp
+            .boot_disk_image
+            .as_deref()
+            .unwrap_or(&pool.boot_disk_image);
+        let boot_disk_size_gb = cp.boot_disk_size_gb.unwrap_or(pool.boot_disk_size_gb);
+
         let ssh_meta = read_ssh_public_key(&cp.ssh_public_key_path)
             .map(|k| format!("ubuntu:{k}"))
             .unwrap_or_else(|e| {
@@ -1108,22 +1249,25 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             });
         let script = read_startup_script(&cp.startup_script_path);
+
         let resp = create_vm(
             &access_token,
             &gcp.project_id,
             &gcp.zone,
             &cp.instance_name,
-            &pool.machine_type,
-            &pool.boot_disk_image,
-            pool.boot_disk_size_gb,
+            machine_type,
+            boot_disk_image,
+            boot_disk_size_gb,
             &ssh_meta,
             &script,
         )?;
         println!("{}", serde_json::to_string_pretty(&resp)?);
     }
 
-    for w in &cfg.workers {
+    // Create worker nodes using the pool's shared machine configuration.
+    for w in &pool.workers {
         println!("\n  ── Creating worker node ({}) ──", w.instance_name);
+
         let ssh_meta = read_ssh_public_key(&w.ssh_public_key_path)
             .map(|k| format!("ubuntu:{k}"))
             .unwrap_or_else(|e| {
@@ -1131,6 +1275,7 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             });
         let script = read_startup_script(&w.startup_script_path);
+
         let resp = create_vm(
             &access_token,
             &gcp.project_id,
@@ -1171,11 +1316,11 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     for cp in &cfg.control_planes {
         println!("  control-plane  → {}", cp.instance_name);
     }
-    for w in &cfg.workers {
+    for w in &cfg.node_pool.workers {
         println!("  worker         → {}", w.instance_name);
     }
 
-    let total = cfg.control_planes.len() + cfg.workers.len();
+    let total = cfg.control_planes.len() + cfg.node_pool.workers.len();
     println!();
     println!("⚠  This action is IRREVERSIBLE. All {total} VM instances and their boot");
     println!("   disks will be permanently deleted.");
@@ -1208,7 +1353,7 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    for w in &cfg.workers {
+    for w in &cfg.node_pool.workers {
         println!("\n  ── Deleting worker node ({}) ──", w.instance_name);
         match delete_vm(&access_token, &gcp.project_id, &gcp.zone, &w.instance_name) {
             Ok(body) => println!("{}", serde_json::to_string_pretty(&body)?),
@@ -1281,7 +1426,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let cp_nodes = resolve(&cfg.control_planes)?;
-    let worker_nodes = resolve(&cfg.workers)?;
+    let worker_nodes = resolve(&cfg.node_pool.workers)?;
 
     println!("  SSH user: {ssh_user}");
 
