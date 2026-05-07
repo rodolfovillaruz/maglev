@@ -351,79 +351,6 @@ fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point — subcommand dispatch
-// ---------------------------------------------------------------------------
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
-
-    match env::args().nth(1).as_deref() {
-        Some("generate") => match env::args().nth(2) {
-            Some(path) => generate_config(&path),
-            None => {
-                eprintln!("error: 'generate' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev generate <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("apply") => match env::args().nth(2) {
-            Some(path) => apply_config(&path),
-            None => {
-                eprintln!("error: 'apply' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev apply <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("destroy") => match env::args().nth(2) {
-            Some(path) => destroy_config(&path),
-            None => {
-                eprintln!("error: 'destroy' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev destroy <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("play") => match env::args().nth(2) {
-            Some(path) => play_config(&path),
-            None => {
-                eprintln!("error: 'play' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev play <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("print") => print_build_credential(),
-
-        None | Some(_) => {
-            eprintln!("USAGE:");
-            eprintln!("    maglev [SUBCOMMAND]");
-            eprintln!();
-            eprintln!("SUBCOMMANDS:");
-            eprintln!("    generate <config>    Generate a .maglev config file from env vars");
-            eprintln!("    apply <config>       Create VMs from a .maglev config file");
-            eprintln!(
-                "    destroy <config>     Permanently delete VMs described in a .maglev config"
-            );
-            eprintln!(
-                "    play <config>        Provision Kubernetes and join workers to the control-plane"
-            );
-            eprintln!("    print                Run the credential builder");
-            std::process::exit(1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // JWT (RS256)
 // ---------------------------------------------------------------------------
 
@@ -975,9 +902,10 @@ fn env_list(var: &str) -> Option<Vec<String>> {
     })
 }
 
-fn generate_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if Path::new(config_path).exists() {
+fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !force && Path::new(config_path).exists() {
         eprintln!("error: '{config_path}' already exists");
+        eprintln!("  Use -f to overwrite.");
         std::process::exit(1);
     }
 
@@ -1495,4 +1423,84 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("    kubectl get nodes -o wide");
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Entry point — subcommand dispatch
+// ---------------------------------------------------------------------------
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
+
+    match env::args().nth(1).as_deref() {
+        Some("generate") => {
+            // Collect every arg after the sub-command name.
+            let rest: Vec<String> = env::args().skip(2).collect();
+            let force = rest.iter().any(|a| a == "-f" || a == "--force");
+            let path = rest.iter().find(|a| !a.starts_with('-'));
+
+            match path {
+                Some(p) => generate_config(p, force),
+                None => {
+                    eprintln!("error: 'generate' requires a config file path");
+                    eprintln!();
+                    eprintln!("USAGE:");
+                    eprintln!("    maglev generate [-f] <config.maglev>");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Some("apply") => match env::args().nth(2) {
+            Some(path) => apply_config(&path),
+            None => {
+                eprintln!("error: 'apply' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev apply <config.maglev>");
+                std::process::exit(1);
+            }
+        },
+
+        Some("destroy") => match env::args().nth(2) {
+            Some(path) => destroy_config(&path),
+            None => {
+                eprintln!("error: 'destroy' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev destroy <config.maglev>");
+                std::process::exit(1);
+            }
+        },
+
+        Some("play") => match env::args().nth(2) {
+            Some(path) => play_config(&path),
+            None => {
+                eprintln!("error: 'play' requires a config file path");
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("    maglev play <config.maglev>");
+                std::process::exit(1);
+            }
+        },
+
+        Some("print") => print_build_credential(),
+
+        None | Some(_) => {
+            eprintln!("USAGE:");
+            eprintln!("    maglev [SUBCOMMAND]");
+            eprintln!();
+            eprintln!("SUBCOMMANDS:");
+            eprintln!("    generate [-f] <config>   Generate a .maglev config file from env vars");
+            eprintln!("    apply <config>           Create VMs from a .maglev config file");
+            eprintln!(
+                "    destroy <config>         Permanently delete VMs described in a .maglev config"
+            );
+            eprintln!(
+                "    play <config>            Provision Kubernetes and join workers to the control-plane"
+            );
+            eprintln!("    print                    Run the credential builder");
+            std::process::exit(1);
+        }
+    }
 }
