@@ -684,102 +684,6 @@ fn create_vm(
 }
 
 // ---------------------------------------------------------------------------
-// .maglev config parser
-//
-// Supports labeled node blocks:
-//
-//   maglev "prod" {
-//     node "control_plane" { ... }   → keys: node_control_plane.<key>
-//     node "worker"        { ... }   → keys: node_worker.<key>
-//     node_pool  { ... }             → keys: node_pool.<key>
-//     gcp_config { ... }             → keys: gcp_config.<key>
-//   }
-//
-// The maglev label is stored as "name".
-// ---------------------------------------------------------------------------
-
-fn parse_maglev_config(
-    content: &str,
-) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
-    let mut map = std::collections::HashMap::new();
-    let mut block_stack: Vec<String> = Vec::new();
-
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // ── Close a block ────────────────────────────────────────────────────
-        if line == "}" {
-            block_stack.pop();
-            continue;
-        }
-
-        // ── Open a block ─────────────────────────────────────────────────────
-        if line.ends_with('{') {
-            let header = line.trim_end_matches('{').trim();
-
-            if header.starts_with("maglev") {
-                // maglev "label" → store label under "name"
-                let label = header
-                    .split_once('"')
-                    .map(|x| x.1)
-                    .and_then(|s| s.split('"').next())
-                    .unwrap_or("")
-                    .to_string();
-
-                if !label.is_empty() {
-                    map.insert("name".to_string(), label);
-                }
-
-                block_stack.push("maglev".to_string());
-            } else if let Some((block_type, rest)) = header.split_once(' ') {
-                // block_type "label"  →  block_type_label
-                let label = rest.trim().trim_matches('"');
-                let prefix = if label.is_empty() {
-                    block_type.to_string()
-                } else {
-                    format!("{block_type}_{label}")
-                };
-                block_stack.push(prefix);
-            } else {
-                // Bare block name: node_pool, gcp_config, …
-                block_stack.push(header.to_string());
-            }
-
-            continue;
-        }
-
-        // ── key = "value" ────────────────────────────────────────────────────
-        let Some(eq_pos) = line.find('=') else {
-            continue;
-        };
-
-        let key = line[..eq_pos].trim();
-        let value_part = line[eq_pos + 1..].trim();
-
-        if !(value_part.starts_with('"') && value_part.ends_with('"') && value_part.len() >= 2) {
-            continue;
-        }
-
-        let value = value_part[1..value_part.len() - 1].to_string();
-
-        // Prefix with the innermost non-maglev block, if any.
-        let full_key = block_stack
-            .iter()
-            .rfind(|b| b.as_str() != "maglev")
-            .map(|b| format!("{b}.{key}"))
-            .unwrap_or_else(|| key.to_string());
-
-        map.insert(full_key, value);
-    }
-
-    Ok(map)
-}
-
-// ---------------------------------------------------------------------------
 // `apply` subcommand
 // ---------------------------------------------------------------------------
 
@@ -1501,4 +1405,68 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("    kubectl get nodes -o wide");
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// .maglev config parser  (backed by hcl-rs)
+//
+// The file format is:
+//
+//   maglev "prod" {
+//     node "control_plane" { instance_name = "…" … }
+//     node "worker"        { instance_name = "…" … }
+//     node_pool  { boot_disk_image = "…" … }
+//     gcp_config { client_email   = "…" … }
+//   }
+//
+// Produces a flat HashMap with keys such as:
+//   "name"                                → the maglev block label
+//   "node_control_plane.instance_name"    → value
+//   "node_worker.instance_name"           → value
+//   "node_pool.boot_disk_image"           → value
+//   "gcp_config.client_email"             → value
+// ---------------------------------------------------------------------------
+
+/// Convert a scalar HCL expression to a String, accepting plain strings and
+/// numbers (so `boot_disk_size_gb` can be written with or without quotes).
+fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
+    match expr {
+        hcl::Expression::String(s) => Some(s.clone()),
+        hcl::Expression::Number(n) => Some(n.to_string()),
+        hcl::Expression::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_maglev_config(
+    content: &str,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    let body = hcl::parse(content).map_err(|e| format!("HCL parse error: {e}"))?;
+
+    let mut map = std::collections::HashMap::new();
+
+    for maglev_block in body.blocks() {
+        if maglev_block.identifier() != "maglev" {
+            continue;
+        }
+
+        if let Some(label) = maglev_block.labels().first() {
+            map.insert("name".to_string(), label.as_str().to_string());
+        }
+
+        for block in maglev_block.body().blocks() {
+            let prefix = match block.labels().first() {
+                Some(label) => format!("{}_{}", block.identifier(), label.as_str()),
+                None => block.identifier().to_string(),
+            };
+
+            for attr in block.body().attributes() {
+                if let Some(val) = expr_to_string(attr.expr()) {
+                    map.insert(format!("{prefix}.{}", attr.key()), val);
+                }
+            }
+        }
+    }
+
+    Ok(map)
 }

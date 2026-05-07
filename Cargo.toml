@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 base64 = "0.22"
 dotenv = "0.15.0"
+hcl-rs = "0.19.7"
 rcgen = "0.14.7"
 rsa = { version = "0.9", features = ["pem"] }
 serde = { version = "1", features = ["derive"] }
