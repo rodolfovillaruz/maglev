@@ -4,8 +4,59 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// CLI definition
+// ---------------------------------------------------------------------------
+
+/// Maglev — GCP Kubernetes cluster manager
+#[derive(Parser)]
+#[command(
+    name = "maglev",
+    version,
+    about = "Provision and manage GCP-backed Kubernetes clusters"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate a .maglev config file from environment variables
+    Generate {
+        /// Path at which to write the config file
+        config: String,
+
+        /// Overwrite the file if it already exists
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Create VM instances described by a .maglev config file
+    Apply {
+        /// Path to the .maglev config file
+        config: String,
+    },
+
+    /// Permanently delete VM instances described by a .maglev config file
+    Destroy {
+        /// Path to the .maglev config file
+        config: String,
+    },
+
+    /// Provision Kubernetes on control-plane nodes and join workers
+    Play {
+        /// Path to the .maglev config file
+        config: String,
+    },
+
+    /// Run the interactive credential builder
+    Print,
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -654,43 +705,6 @@ fn ssh_run(
 
 // ---------------------------------------------------------------------------
 // .maglev HCL config — parser
-//
-// File format:
-//
-//   maglev "prod" {
-//
-//     node "control_plane" "maglev-cp-alpha" {
-//       ssh_public_key_path = "~/.ssh/id_ed25519.pub"
-//       startup_script_path = "./startup-cp.sh"
-//     }
-//
-//     node "control_plane" "maglev-cp-beta" {
-//       ssh_public_key_path = "~/.ssh/id_ed25519.pub"
-//       startup_script_path = "./startup-cp.sh"
-//     }
-//
-//     node "worker" "maglev-worker-alpha" {
-//       ssh_public_key_path = "~/.ssh/id_ed25519.pub"
-//       startup_script_path = "./startup.sh"
-//     }
-//
-//     node "worker" "maglev-worker-beta" { … }
-//     node "worker" "maglev-worker-gamma" { … }
-//
-//     node_pool {
-//       boot_disk_image   = "ubuntu-2404-lts-amd64"
-//       boot_disk_size_gb = 50
-//       machine_type      = "e2-medium"
-//       name              = "prod"
-//     }
-//
-//     gcp_config {
-//       client_email = "sa@project.iam.gserviceaccount.com"
-//       private_key  = ".keys/private_key.pem"
-//       project_id   = "my-project"
-//       zone         = "europe-north1-a"
-//     }
-//   }
 // ---------------------------------------------------------------------------
 
 fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
@@ -702,7 +716,6 @@ fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
     }
 }
 
-/// Collect all attributes of a block body into a flat `HashMap<key, value>`.
 fn block_attrs(body: &hcl::Body) -> HashMap<String, String> {
     body.attributes()
         .filter_map(|a| expr_to_string(a.expr()).map(|v| (a.key().to_string(), v)))
@@ -712,7 +725,6 @@ fn block_attrs(body: &hcl::Body) -> HashMap<String, String> {
 fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error::Error>> {
     let body = hcl::parse(content).map_err(|e| format!("HCL parse error: {e}"))?;
 
-    // Find the first `maglev` block.
     let maglev_block = body
         .blocks()
         .find(|b| b.identifier() == "maglev")
@@ -731,8 +743,6 @@ fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error
 
     for block in maglev_block.body().blocks() {
         match block.identifier() {
-            // node "control_plane" "maglev-cp-alpha" { … }
-            // node "worker"       "maglev-worker-alpha" { … }
             "node" => {
                 let labels = block.labels();
                 let role = labels
@@ -812,7 +822,6 @@ fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error
             }
 
             other => {
-                // Silently ignore unknown blocks so the format stays extensible.
                 eprintln!("  ⚠  Unknown block '{other}' in maglev config — skipping.");
             }
         }
@@ -835,7 +844,7 @@ fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error
 }
 
 // ---------------------------------------------------------------------------
-// .maglev HCL config — generator (uses hcl-rs builders)
+// .maglev HCL config — generator
 // ---------------------------------------------------------------------------
 
 fn build_node_block(role: &str, entry: &NodeEntry) -> hcl::Block {
@@ -877,8 +886,6 @@ fn serialize_config(cfg: &MaglevConfig) -> Result<String, Box<dyn std::error::Er
     inner = inner.add_block(build_node_pool_block(&cfg.node_pool));
     inner = inner.add_block(build_gcp_config_block(&cfg.gcp));
 
-    // hcl-rs can only render a top-level Body, so we embed the inner body
-    // attributes/blocks into a `maglev "<name>" { … }` wrapper block.
     let maglev_block = hcl::Block::builder("maglev")
         .add_label(&cfg.name)
         .add_blocks(inner.build().into_blocks())
@@ -892,7 +899,6 @@ fn serialize_config(cfg: &MaglevConfig) -> Result<String, Box<dyn std::error::Er
 // `generate` subcommand
 // ---------------------------------------------------------------------------
 
-/// Parse a comma-separated env var into a `Vec<String>`, stripping whitespace.
 fn env_list(var: &str) -> Option<Vec<String>> {
     env::var(var).ok().map(|v| {
         v.split(',')
@@ -905,7 +911,7 @@ fn env_list(var: &str) -> Option<Vec<String>> {
 fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !force && Path::new(config_path).exists() {
         eprintln!("error: '{config_path}' already exists");
-        eprintln!("  Use -f to overwrite.");
+        eprintln!("  Use -f / --force to overwrite.");
         std::process::exit(1);
     }
 
@@ -943,19 +949,14 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
     let worker_startup_script_path = env::var("MAGLEV_WORKER_STARTUP_SCRIPT_PATH")
         .unwrap_or_else(|_| "./startup.sh".to_string());
 
-    // ── Node arrays ──────────────────────────────────────────────────────────
-    //
-    // Override via comma-separated env vars:
-    //   MAGLEV_CP_INSTANCES=maglev-cp-alpha,maglev-cp-beta
-    //   MAGLEV_WORKER_INSTANCES=maglev-worker-alpha,maglev-worker-beta,maglev-worker-gamma
     let cp_names = env_list("MAGLEV_CP_INSTANCES")
-        .unwrap_or_else(|| vec![format!("maglev-cp-alpha"), format!("maglev-cp-beta")]);
+        .unwrap_or_else(|| vec!["maglev-cp-alpha".to_string(), "maglev-cp-beta".to_string()]);
 
     let worker_names = env_list("MAGLEV_WORKER_INSTANCES").unwrap_or_else(|| {
         vec![
-            format!("maglev-worker-alpha"),
-            format!("maglev-worker-beta"),
-            format!("maglev-worker-gamma"),
+            "maglev-worker-alpha".to_string(),
+            "maglev-worker-beta".to_string(),
+            "maglev-worker-gamma".to_string(),
         ]
     });
 
@@ -996,7 +997,6 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
     };
 
     let hcl_text = serialize_config(&cfg)?;
-
     fs::write(config_path, &hcl_text)
         .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
 
@@ -1096,13 +1096,11 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Exchanging JWT for OAuth2 access token...");
     let access_token = get_access_token(&jwt)?;
 
-    // ── Create control-plane nodes ───────────────────────────────────────────
     for cp in &cfg.control_planes {
         println!(
             "\n  ── Creating control-plane node ({}) ──",
             cp.instance_name
         );
-
         let ssh_meta = read_ssh_public_key(&cp.ssh_public_key_path)
             .map(|k| format!("ubuntu:{k}"))
             .unwrap_or_else(|e| {
@@ -1110,7 +1108,6 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             });
         let script = read_startup_script(&cp.startup_script_path);
-
         let resp = create_vm(
             &access_token,
             &gcp.project_id,
@@ -1125,10 +1122,8 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string_pretty(&resp)?);
     }
 
-    // ── Create worker nodes ──────────────────────────────────────────────────
     for w in &cfg.workers {
         println!("\n  ── Creating worker node ({}) ──", w.instance_name);
-
         let ssh_meta = read_ssh_public_key(&w.ssh_public_key_path)
             .map(|k| format!("ubuntu:{k}"))
             .unwrap_or_else(|e| {
@@ -1136,7 +1131,6 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             });
         let script = read_startup_script(&w.startup_script_path);
-
         let resp = create_vm(
             &access_token,
             &gcp.project_id,
@@ -1234,13 +1228,6 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 // ---------------------------------------------------------------------------
 // `play` subcommand
-//
-// 1. For each control-plane node:
-//      • Check if /etc/kubernetes/admin.conf exists.
-//      • If not → prompt → run `sudo cisak install --control-plane -y`.
-// 2. For each worker node:
-//      • Fetch a fresh join command from the first control-plane.
-//      • Prompt → run `sudo <join-command>` on the worker.
 // ---------------------------------------------------------------------------
 
 fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1254,7 +1241,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let gcp = &cfg.gcp;
     let ssh_user = env::var("MAGLEV_SSH_USER").unwrap_or_else(|_| "ubuntu".to_string());
 
-    // ── GCP authentication ───────────────────────────────────────────────────
     let gcp_private_key = load_gcp_private_key(gcp)?;
 
     println!("\n  Signing JWT...");
@@ -1266,7 +1252,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Exchanging JWT for OAuth2 access token...");
     let access_token = get_access_token(&jwt)?;
 
-    // ── Resolve external IPs for every node ──────────────────────────────────
     println!("\n  Fetching external IPs from Compute Engine API...");
 
     struct NodeInfo {
@@ -1300,9 +1285,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  SSH user: {ssh_user}");
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Step 1 — Provision each control-plane node
-    // ════════════════════════════════════════════════════════════════════════
     println!(
         "\n━━ Step 1 / 2 — Control-plane provisioning ({} nodes) ━━━━━━━━━━━━━━━━━",
         cp_nodes.len()
@@ -1352,12 +1334,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n  ✓ {name} provisioned.");
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Step 2 — Join each worker to the control-plane
-    //
-    // Join commands are fetched from the *first* control-plane each time so
-    // the token is always fresh (kubeadm tokens expire after 24 h by default).
-    // ════════════════════════════════════════════════════════════════════════
     println!(
         "\n━━ Step 2 / 2 — Join workers ({} nodes) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         worker_nodes.len()
@@ -1377,7 +1353,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "  Fetching join command from {} …",
             primary_cp.entry.instance_name
         );
-        println!("  Command on CP: sudo kubeadm token create --print-join-command");
 
         if !prompt_yes_no("  Fetch join command?") {
             println!("  Skipped.");
@@ -1426,81 +1401,19 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point — subcommand dispatch
+// Entry point
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
 
-    match env::args().nth(1).as_deref() {
-        Some("generate") => {
-            // Collect every arg after the sub-command name.
-            let rest: Vec<String> = env::args().skip(2).collect();
-            let force = rest.iter().any(|a| a == "-f" || a == "--force");
-            let path = rest.iter().find(|a| !a.starts_with('-'));
+    let cli = Cli::parse();
 
-            match path {
-                Some(p) => generate_config(p, force),
-                None => {
-                    eprintln!("error: 'generate' requires a config file path");
-                    eprintln!();
-                    eprintln!("USAGE:");
-                    eprintln!("    maglev generate [-f] <config.maglev>");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Some("apply") => match env::args().nth(2) {
-            Some(path) => apply_config(&path),
-            None => {
-                eprintln!("error: 'apply' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev apply <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("destroy") => match env::args().nth(2) {
-            Some(path) => destroy_config(&path),
-            None => {
-                eprintln!("error: 'destroy' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev destroy <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("play") => match env::args().nth(2) {
-            Some(path) => play_config(&path),
-            None => {
-                eprintln!("error: 'play' requires a config file path");
-                eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    maglev play <config.maglev>");
-                std::process::exit(1);
-            }
-        },
-
-        Some("print") => print_build_credential(),
-
-        None | Some(_) => {
-            eprintln!("USAGE:");
-            eprintln!("    maglev [SUBCOMMAND]");
-            eprintln!();
-            eprintln!("SUBCOMMANDS:");
-            eprintln!("    generate [-f] <config>   Generate a .maglev config file from env vars");
-            eprintln!("    apply <config>           Create VMs from a .maglev config file");
-            eprintln!(
-                "    destroy <config>         Permanently delete VMs described in a .maglev config"
-            );
-            eprintln!(
-                "    play <config>            Provision Kubernetes and join workers to the control-plane"
-            );
-            eprintln!("    print                    Run the credential builder");
-            std::process::exit(1);
-        }
+    match cli.command {
+        Commands::Generate { config, force } => generate_config(&config, force),
+        Commands::Apply { config } => apply_config(&config),
+        Commands::Destroy { config } => destroy_config(&config),
+        Commands::Play { config } => play_config(&config),
+        Commands::Print => print_build_credential(),
     }
 }
