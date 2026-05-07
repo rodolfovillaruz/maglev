@@ -857,7 +857,7 @@ fn parse_maglev_config(content: &str) -> Result<MaglevConfig, Box<dyn std::error
                     machine_type: attrs
                         .get("machine_type")
                         .cloned()
-                        .unwrap_or_else(|| "e2-medium".to_string()),
+                        .unwrap_or_else(|| "e2-standard-2".to_string()),
                     name: attrs.get("name").cloned().unwrap_or_else(|| name.clone()),
                     workers,
                 });
@@ -1030,7 +1030,7 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
 
     // --- Control-plane machine config (each CP node gets its own copy) ---
     let cp_machine_type =
-        env::var("MAGLEV_CP_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
+        env::var("MAGLEV_CP_MACHINE_TYPE").unwrap_or_else(|_| "e2-standard-2".to_string());
     let cp_boot_disk_image = env::var("MAGLEV_CP_BOOT_DISK_IMAGE")
         .unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
     let cp_boot_disk_size_gb: u64 = env::var("MAGLEV_CP_BOOT_DISK_SIZE_GB")
@@ -1045,7 +1045,7 @@ fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::er
 
     // --- Worker / pool machine config ---
     let pool_machine_type =
-        env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-medium".to_string());
+        env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-standard-2".to_string());
     let pool_boot_disk_image =
         env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
     let pool_boot_disk_size_gb: u64 = env::var("MAGLEV_BOOT_DISK_SIZE_GB")
