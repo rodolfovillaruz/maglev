@@ -15,8 +15,7 @@ digitalocean:
   generics:
   - name: default
     config:
-    - ssh-public-key: ~/.ssh/id_ed25519.pub
-      script: |-
+    - script: |-
         #!/bin/bash
         set -e
 
@@ -25,6 +24,7 @@ digitalocean:
         install -m 755 -o root -g root cisak /usr/local/bin/cisak
         cisak generate
         cisak install -y
+      ssh-public-key: ~/.ssh/id_ed25519.pub
   specs:
   - name: control-plane
     config:
