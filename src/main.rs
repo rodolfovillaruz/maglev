@@ -2,7 +2,6 @@ mod provider;
 mod utils;
 
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 
 use clap::{Parser, Subcommand};
@@ -75,6 +74,8 @@ struct GenericConfigYaml {
     #[serde(rename = "ssh-public-key")]
     ssh_public_key: String,
     script: String,
+    // Added: matches the new `user` field in both provider YAML files.
+    user: String,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -157,7 +158,6 @@ struct DoYaml {
 // Unified view of a loaded config (provider-agnostic body + typed creds)
 // ---------------------------------------------------------------------------
 
-/// Everything from a YAML file that doesn't depend on which cloud is chosen.
 struct CommonConfig {
     groups: Vec<GroupYaml>,
     generics: Vec<GenericYaml>,
@@ -165,19 +165,15 @@ struct CommonConfig {
     rules: Vec<RuleYaml>,
 }
 
-/// What kind of provider was detected and the matching provider instance.
 enum LoadedProvider {
     Gcp {
         common: CommonConfig,
-        /// Human-readable location string for progress messages.
         location: String,
-        /// Service-account e-mail (shown in summaries).
         identity: String,
         provider: GcpProvider,
     },
     DigitalOcean {
         common: CommonConfig,
-        /// Region slug (shown in summaries).
         location: String,
         provider: DigitalOceanProvider,
     },
@@ -219,13 +215,10 @@ impl LoadedProvider {
 // Config loading + provider detection
 // ---------------------------------------------------------------------------
 
-/// Inspect the top-level key of a YAML file to decide which provider to use,
-/// then parse it fully and build the authenticated provider client.
 fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error>> {
     let content =
         fs::read_to_string(path).map_err(|e| format!("Cannot read config file '{path}': {e}"))?;
 
-    // Peek at the raw YAML to find the top-level discriminator key.
     let raw: serde_yaml::Value =
         serde_yaml::from_str(&content).map_err(|e| format!("YAML parse error in '{path}': {e}"))?;
 
@@ -374,7 +367,11 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "    machine-type: {}  image: {}  disk: {} GB",
             r.spec.machine_type, r.spec.boot_disk_image, r.spec.boot_disk_size
         );
-        println!("    ssh-public-key: {}", r.generic.ssh_public_key);
+        // Show both the user and the key path in the summary.
+        println!(
+            "    user: {}  ssh-public-key: {}",
+            r.generic.user, r.generic.ssh_public_key
+        );
         for node in r.nodes {
             println!("      • {node}");
             total += 1;
@@ -394,8 +391,10 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             r.group_name
         );
 
+        // Use the `user` field from the generic config instead of the
+        // previously hard-coded "ubuntu" prefix.
         let ssh_meta = read_ssh_public_key(&r.generic.ssh_public_key)
-            .map(|k| format!("ubuntu:{k}"))
+            .map(|k| format!("{}:{k}", r.generic.user))
             .unwrap_or_else(|e| {
                 eprintln!("  ⚠ Could not read SSH public key: {e}");
                 String::new()
@@ -545,18 +544,20 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let common = loaded.common();
     let provider = loaded.provider();
 
-    let ssh_user = env::var("MAGLEV_SSH_USER").unwrap_or_else(|_| "ubuntu".to_string());
-
-    // Derive the SSH private key path from the generics "default" entry
-    // by stripping the ".pub" suffix from the public key path.
-    let ssh_pub_path = common
+    // Resolve the "default" generic config entry once; every field we need
+    // lives there (ssh-public-key and the new `user` field).
+    let default_generic = common
         .generics
         .iter()
         .find(|g| g.name == "default")
         .and_then(|g| g.config.first())
-        .map(|c| c.ssh_public_key.as_str())
-        .unwrap_or("~/.ssh/id_ed25519.pub");
+        .ok_or("No 'default' generics entry found in config")?;
 
+    // `user` now comes from the YAML rather than an environment variable.
+    let ssh_user = &default_generic.user;
+
+    // Derive the private key path by stripping the ".pub" suffix.
+    let ssh_pub_path = default_generic.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
     println!("\n── Provider settings ────────────────────────────────────────────────────");
@@ -564,7 +565,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n  Fetching IPs …");
 
-    // Collect nodes for control-plane and worker groups from rules.
     let cp_nodes: Vec<&str> = common
         .rules
         .iter()
@@ -598,7 +598,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  SSH user: {ssh_user}  private key: {ssh_priv_path}");
 
-    // ── Step 1: provision control-plane nodes ─────────────────────────────────
+    // ── Step 1: provision control-plane nodes ────────────────────────────────
     println!(
         "\n━━ Step 1 / 2 — Control-plane provisioning ({} nodes) ━━━━━━━━━━━━━━━━━",
         cp_with_ips.len()
@@ -613,7 +613,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         let check = ssh_capture(
             ip,
-            &ssh_user,
+            ssh_user,
             &ssh_priv_path,
             "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
         )?;
@@ -631,14 +631,14 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n  Provisioning — this may take several minutes …\n");
         ssh_run(
             ip,
-            &ssh_user,
+            ssh_user,
             &ssh_priv_path,
             "sudo cisak install --control-plane -y",
         )?;
         println!("\n  ✓ {name} provisioned.");
     }
 
-    // ── Step 2: join workers ──────────────────────────────────────────────────
+    // ── Step 2: join workers ─────────────────────────────────────────────────
     println!(
         "\n━━ Step 2 / 2 — Join workers ({} nodes) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         worker_with_ips.len()
@@ -657,7 +657,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         let join_cmd = ssh_capture(
             primary_cp_ip,
-            &ssh_user,
+            ssh_user,
             &ssh_priv_path,
             "sudo kubeadm token create --print-join-command",
         )?;
@@ -669,7 +669,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         println!("  Join command: {join_cmd}");
         println!("\n  Joining {name} …\n");
-        ssh_run(ip, &ssh_user, &ssh_priv_path, &format!("sudo {join_cmd}"))?;
+        ssh_run(ip, ssh_user, &ssh_priv_path, &format!("sudo {join_cmd}"))?;
         println!("\n  ✓ {name} joined.");
     }
 

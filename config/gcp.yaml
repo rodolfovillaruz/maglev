@@ -25,6 +25,7 @@ gcp:
         cisak generate
         cisak install -y
       ssh-public-key: ~/.ssh/id_ed25519.pub
+      user: ubuntu
   specs:
   - name: control-plane
     config:
