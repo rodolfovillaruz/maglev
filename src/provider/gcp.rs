@@ -1,3 +1,4 @@
+use crate::provider::Provider;
 use crate::utils::prompt_yes_no;
 use std::io::{BufRead, Write, stdin, stdout};
 
@@ -8,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
-// Types
+// Credential types (used by the credential-builder flow)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,120 +20,183 @@ struct ServiceAccountCredentials {
     client_email: String,
 }
 
+/// Raw credential data read from the YAML config.
 #[derive(Debug, Clone)]
-pub struct GcpEntry {
+pub struct GcpCredentials {
     pub client_email: String,
-    pub private_key: String,
+    /// Path to the PEM private key file.
+    pub private_key_path: String,
     pub project_id: String,
     pub zone: String,
 }
 
 // ---------------------------------------------------------------------------
-// Compute Engine — CREATE instance
+// GcpProvider — implements Provider
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-pub fn create_vm(
-    access_token: &str,
-    project_id: &str,
-    zone: &str,
-    instance_name: &str,
-    machine_type: &str,
-    boot_disk_image: &str,
-    boot_disk_size_gb: u64,
-    ssh_keys_metadata: &str,
-    startup_script: &str,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances"
-    );
+/// A ready-to-use GCP client.  Construct it with [`GcpProvider::new`]; that
+/// call signs a JWT, exchanges it for an OAuth2 access token, and stores
+/// everything needed for subsequent API calls.
+pub struct GcpProvider {
+    access_token: String,
+    project_id: String,
+    zone: String,
+}
 
-    let mut metadata_items: Vec<Value> = Vec::new();
+impl GcpProvider {
+    pub fn new(creds: &GcpCredentials) -> Result<Self, Box<dyn std::error::Error>> {
+        let private_key_pem = fs::read_to_string(&creds.private_key_path).map_err(|e| {
+            format!(
+                "Cannot read GCP private key from '{}': {e}",
+                creds.private_key_path
+            )
+        })?;
 
-    if !ssh_keys_metadata.is_empty() {
-        metadata_items.push(serde_json::json!({
-            "key":   "ssh-keys",
-            "value": ssh_keys_metadata,
-        }));
+        println!("  Signing JWT with RSA-SHA256 …");
+        let jwt = create_jwt(
+            &private_key_pem,
+            &creds.client_email,
+            "https://www.googleapis.com/auth/compute",
+        )?;
+
+        println!("  Exchanging JWT for OAuth2 access token …");
+        let access_token = get_access_token(&jwt)?;
+
+        Ok(Self {
+            access_token,
+            project_id: creds.project_id.clone(),
+            zone: creds.zone.clone(),
+        })
     }
 
-    if !startup_script.is_empty() {
-        metadata_items.push(serde_json::json!({
-            "key":   "startup-script",
-            "value": startup_script,
-        }));
+    /// Fetch the **internal** IP of an instance (used by `play`).
+    pub fn get_vm_ip(&self, instance_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}",
+            self.project_id, self.zone, instance_name
+        );
+
+        let agent = build_agent();
+        let mut resp = agent
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.access_token))
+            .call()?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "Compute Engine API returned HTTP {status} while fetching '{instance_name}': {body}"
+            )
+            .into());
+        }
+
+        body["networkInterfaces"][0]["networkIP"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("No internal IP found for instance '{instance_name}'").into())
+    }
+}
+
+impl Provider for GcpProvider {
+    fn create_vm(
+        &self,
+        instance_name: &str,
+        machine_type: &str,
+        boot_disk_image: &str,
+        boot_disk_size_gb: u64,
+        ssh_keys_metadata: &str,
+        startup_script: &str,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances",
+            self.project_id, self.zone
+        );
+
+        let mut metadata_items: Vec<Value> = Vec::new();
+
+        if !ssh_keys_metadata.is_empty() {
+            metadata_items.push(serde_json::json!({
+                "key":   "ssh-keys",
+                "value": ssh_keys_metadata,
+            }));
+        }
+
+        if !startup_script.is_empty() {
+            metadata_items.push(serde_json::json!({
+                "key":   "startup-script",
+                "value": startup_script,
+            }));
+        }
+
+        let zone = &self.zone;
+        let request_body = serde_json::json!({
+            "name": instance_name,
+            "machineType": format!("zones/{zone}/machineTypes/{machine_type}"),
+            "disks": [{
+                "boot": true,
+                "autoDelete": true,
+                "initializeParams": {
+                    "sourceImage": resolve_image(boot_disk_image),
+                    "diskSizeGb":  boot_disk_size_gb.to_string(),
+                }
+            }],
+            "networkInterfaces": [{
+                "network": "global/networks/default"
+            }],
+            "metadata": { "items": metadata_items }
+        });
+
+        let agent = build_agent();
+        let mut resp = agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.access_token))
+            .header("Content-Type", "application/json")
+            .send_json(request_body)?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!("Compute Engine API returned HTTP {status}: {body}").into());
+        }
+
+        Ok(body)
     }
 
-    let request_body = serde_json::json!({
-        "name": instance_name,
-        "machineType": format!("zones/{zone}/machineTypes/{machine_type}"),
-        "disks": [{
-            "boot": true,
-            "autoDelete": true,
-            "initializeParams": {
-                "sourceImage": resolve_image(boot_disk_image),
-                "diskSizeGb":  boot_disk_size_gb.to_string(),
-            }
-        }],
-        "networkInterfaces": [{
-            "network": "global/networks/default"
-        }],
-        "metadata": { "items": metadata_items }
-    });
+    fn destroy_vm(&self, instance_name: &str) -> Result<Value, Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}",
+            self.project_id, self.zone, instance_name
+        );
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
+        let agent = build_agent();
+        let mut resp = agent
+            .delete(&url)
+            .header("Authorization", &format!("Bearer {}", self.access_token))
+            .call()?;
 
-    let mut resp = agent
-        .post(&url)
-        .header("Authorization", &format!("Bearer {access_token}"))
-        .header("Content-Type", "application/json")
-        .send_json(request_body)?;
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
 
-    let status = resp.status();
-    let body: Value = resp.body_mut().read_json()?;
+        if !status.is_success() {
+            return Err(format!("Compute Engine API returned HTTP {status}: {body}").into());
+        }
 
-    if !status.is_success() {
-        return Err(format!("Compute Engine API returned HTTP {status}: {body}").into());
+        Ok(body)
     }
-
-    Ok(body)
 }
 
 // ---------------------------------------------------------------------------
-// Compute Engine — DELETE instance
+// Private helpers
 // ---------------------------------------------------------------------------
 
-pub fn delete_vm(
-    access_token: &str,
-    project_id: &str,
-    zone: &str,
-    instance_name: &str,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_name}"
-    );
-
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+fn build_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .http_status_as_error(false)
         .build()
-        .into();
-
-    let mut resp = agent
-        .delete(&url)
-        .header("Authorization", &format!("Bearer {access_token}"))
-        .call()?;
-
-    let status = resp.status();
-    let body: Value = resp.body_mut().read_json()?;
-
-    if !status.is_success() {
-        return Err(format!("Compute Engine API returned HTTP {status}: {body}").into());
-    }
-
-    Ok(body)
+        .into()
 }
 
 fn resolve_image(image: &str) -> String {
@@ -156,7 +220,76 @@ fn resolve_image(image: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Original credential-builder flow
+// JWT (RS256)
+// ---------------------------------------------------------------------------
+
+fn b64url(input: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
+}
+
+fn create_jwt(
+    private_key_pem: &str,
+    client_email: &str,
+    scope: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use rsa::{RsaPrivateKey, pkcs1v15::Pkcs1v15Sign, pkcs8::DecodePrivateKey};
+    use sha2::{Digest, Sha256};
+
+    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)?;
+
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let exp = now + 3600;
+
+    let header = r#"{"alg":"RS256","typ":"JWT"}"#;
+    let claims = format!(
+        r#"{{"iss":"{}","scope":"{}","aud":"https://oauth2.googleapis.com/token","exp":{},"iat":{}}}"#,
+        client_email, scope, exp, now
+    );
+
+    let signing_input = format!(
+        "{}.{}",
+        b64url(header.as_bytes()),
+        b64url(claims.as_bytes())
+    );
+    let hash = Sha256::digest(signing_input.as_bytes());
+
+    const SHA256_DIGEST_INFO: [u8; 19] = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+    let mut to_sign = Vec::with_capacity(SHA256_DIGEST_INFO.len() + hash.len());
+    to_sign.extend_from_slice(&SHA256_DIGEST_INFO);
+    to_sign.extend_from_slice(&hash);
+
+    let signature = private_key.sign(Pkcs1v15Sign::new_unprefixed(), &to_sign)?;
+    Ok(format!("{}.{}", signing_input, b64url(&signature)))
+}
+
+fn get_access_token(jwt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let agent = build_agent();
+    let mut resp = agent
+        .post("https://oauth2.googleapis.com/token")
+        .send_form([
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", jwt),
+        ])?;
+
+    let status = resp.status();
+    let body: Value = resp.body_mut().read_json()?;
+
+    if !status.is_success() {
+        return Err(format!("Token endpoint returned HTTP {status}: {body}").into());
+    }
+
+    body["access_token"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("No access_token in response: {body}").into())
+}
+
+// ---------------------------------------------------------------------------
+// Credential-builder (`maglev print`)
 // ---------------------------------------------------------------------------
 
 pub fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
@@ -184,8 +317,6 @@ pub fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
     println!("  • Or via CLI:");
     println!("      gcloud iam service-accounts keys upload cert.pem \\");
     println!("        --iam-account={client_email}");
-    println!("  • Verify locally with:");
-    println!("      openssl x509 -in cert.pem -noout -fingerprint -sha256");
 
     println!("\n── Credentials ─────────────────────────────────────────────────────────\n");
 
@@ -195,9 +326,8 @@ pub fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         client_email: client_email.clone(),
     };
 
-    if prompt_yes_no("\nPrint the JSON file") {
-        let json_str = serde_json::to_string_pretty(&credentials)?;
-        println!("{json_str}");
+    if prompt_yes_no("\nPrint the JSON file?") {
+        println!("{}", serde_json::to_string_pretty(&credentials)?);
     }
 
     if prompt_yes_no("\nSave credentials to file?") {
@@ -214,10 +344,6 @@ pub fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Load credentials from GOOGLE_APPLICATION_CREDENTIALS
-// ---------------------------------------------------------------------------
-
 fn load_google_application_credentials()
 -> Option<Result<(String, String), Box<dyn std::error::Error>>> {
     let path = env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()?;
@@ -226,29 +352,21 @@ fn load_google_application_credentials()
     let result = (|| {
         let content =
             fs::read_to_string(&path).map_err(|e| format!("Cannot read '{path}': {e}"))?;
-
         let json: Value = serde_json::from_str(&content)
             .map_err(|e| format!("Cannot parse JSON from '{path}': {e}"))?;
-
         let private_key = json["private_key"]
             .as_str()
-            .ok_or("Missing 'private_key' field in credentials file")?
+            .ok_or("Missing 'private_key' in credentials file")?
             .to_string();
-
         let client_email = json["client_email"]
             .as_str()
-            .ok_or("Missing 'client_email' field in credentials file")?
+            .ok_or("Missing 'client_email' in credentials file")?
             .to_string();
-
         Ok((private_key, client_email))
     })();
 
     Some(result)
 }
-
-// ---------------------------------------------------------------------------
-// Load or generate credentials from MAGLEV_PRIVATE_KEY
-// ---------------------------------------------------------------------------
 
 fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Error>> {
     let key_path = env::var("MAGLEV_PRIVATE_KEY")
@@ -257,28 +375,23 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
     println!("MAGLEV_PRIVATE_KEY = {key_path}");
 
     let private_key = if Path::new(&key_path).exists() {
-        println!("  Key file found — reading...");
+        println!("  Key file found — reading …");
         fs::read_to_string(&key_path).map_err(|e| format!("Cannot read '{key_path}': {e}"))?
     } else {
         println!("  Key file does not exist at: {key_path}");
-
-        if !prompt_yes_no("  Would you like to generate and save a new RSA-2048 private key?") {
-            eprintln!("  Aborted by user.");
+        if !prompt_yes_no("  Generate and save a new RSA-2048 private key?") {
+            eprintln!("  Aborted.");
             std::process::exit(1);
         }
-
         let pem = generate_rsa_private_key_pem()?;
-
         if let Some(parent) = Path::new(&key_path).parent()
             && !parent.as_os_str().is_empty()
         {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Cannot create parent directories: {e}"))?;
         }
-
         fs::write(&key_path, &pem)
             .map_err(|e| format!("Cannot write private key to '{key_path}': {e}"))?;
-
         println!("  Private key saved to: {key_path}");
         pem
     };
@@ -300,7 +413,6 @@ fn public_key_info(
     use time::{Duration, OffsetDateTime};
 
     let key_pair = KeyPair::from_pem(private_key_pem)?;
-
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, client_email);
@@ -329,18 +441,14 @@ fn prompt_client_email() -> Result<String, Box<dyn std::error::Error>> {
     stdout()
         .flush()
         .map_err(|e| format!("Failed to flush stdout: {e}"))?;
-
-    let stdin = stdin();
     let mut line = String::new();
-    stdin
+    stdin()
         .lock()
         .read_line(&mut line)
-        .map_err(|e| format!("Failed to read from stdin: {e}"))?;
-
+        .map_err(|e| format!("Failed to read stdin: {e}"))?;
     let email = line.trim().to_string();
-
     if email.is_empty() {
-        Err("Client email cannot be empty. Aborted.".into())
+        Err("Client email cannot be empty.".into())
     } else {
         Ok(email)
     }
@@ -351,12 +459,9 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
         RsaPrivateKey,
         pkcs8::{EncodePrivateKey, LineEnding},
     };
-
-    println!("  Generating RSA-2048 private key (this may take a moment)...");
-
+    println!("  Generating RSA-2048 private key …");
     let mut rng = rsa::rand_core::OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, 2048)?;
     let pem = private_key.to_pkcs8_pem(LineEnding::LF)?;
-
     Ok(pem.to_string())
 }
