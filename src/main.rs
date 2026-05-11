@@ -31,15 +31,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate a config/gcp.yaml from environment variables
-    Generate {
-        /// Output path (default: config/gcp.yaml)
-        #[arg(default_value = "config/gcp.yaml")]
-        config: String,
-        /// Overwrite if it already exists
-        #[arg(short, long)]
-        force: bool,
-    },
     /// Create VM instances described by a config/gcp.yaml
     Apply {
         /// Path to the YAML config file
@@ -722,7 +713,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Generate { config, force } => generate_config(&config, force),
         Commands::Apply { config } => apply_config(&config),
         Commands::Destroy { config } => destroy_config(&config),
         Commands::Play { config } => play_config(&config),
