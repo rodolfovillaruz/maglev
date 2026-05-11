@@ -84,29 +84,48 @@ impl std::fmt::Display for IpAddressType {
 }
 
 // ---------------------------------------------------------------------------
-// Shared YAML types (identical structure across providers)
+// Shared YAML types
 // ---------------------------------------------------------------------------
 
+/// A named group of node names.
+///
+/// `group_type` must be `"control-plane"` or `"worker"` and determines how
+/// `play` treats the nodes in this group.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct GroupYaml {
     name: String,
+    /// Role of every node in this group.  Accepted values: `"control-plane"`,
+    /// `"worker"`.
+    #[serde(rename = "type")]
+    group_type: String,
     node: Vec<String>,
 }
 
+/// A unified spec entry.  All fields are optional so that multiple spec
+/// entries can be **merged** by a rule: a base spec (e.g. `cisak`) provides
+/// the common fields (user, script, SSH key, machine type, image) while a
+/// role-specific spec (e.g. `control-plane-public`) contributes only the
+/// fields that differ (disk size, ip-address).
+///
+/// After merging, every required field must be present or `resolve_rules`
+/// returns an error.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct GenericYaml {
-    name: String,
-    config: Vec<GenericConfigYaml>,
-}
+struct SpecConfigYaml {
+    // ── generics-origin fields ──────────────────────────────────────────────
+    #[serde(
+        rename = "ssh-public-key",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    ssh_public_key: Option<String>,
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct GenericConfigYaml {
-    #[serde(rename = "ssh-public-key")]
-    ssh_public_key: String,
-    script: String,
-    user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+
     /// Optional stable address for the Kubernetes API server load-balancer.
-    /// When omitted, the primary control-plane node's resolved IP is used.
     /// Format: `<host>` or `<host>:<port>` (port defaults to 6443).
     #[serde(
         rename = "control-plane-endpoint",
@@ -114,6 +133,36 @@ struct GenericConfigYaml {
         skip_serializing_if = "Option::is_none"
     )]
     control_plane_endpoint: Option<String>,
+
+    // ── specs-origin fields ─────────────────────────────────────────────────
+    #[serde(
+        rename = "machine-type",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    machine_type: Option<String>,
+
+    #[serde(
+        rename = "boot-disk-image",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    boot_disk_image: Option<String>,
+
+    #[serde(
+        rename = "boot-disk-size",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    boot_disk_size: Option<u64>,
+
+    /// When absent, defaults to `private` after merging.
+    #[serde(
+        rename = "ip-address",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    ip_address: Option<IpAddressType>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -122,25 +171,54 @@ struct SpecYaml {
     config: Vec<SpecConfigYaml>,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct SpecConfigYaml {
-    #[serde(rename = "machine-type")]
-    machine_type: String,
-    #[serde(rename = "boot-disk-image")]
-    boot_disk_image: String,
-    #[serde(rename = "boot-disk-size")]
-    boot_disk_size: u64,
-    /// Controls whether a public IP is assigned/used.
-    /// Accepts `"public"` or `"private"` only; defaults to `"private"`.
-    #[serde(rename = "ip-address", default)]
-    ip_address: IpAddressType,
-}
-
+/// A rule maps one or more group names to an ordered list of spec names.
+///
+/// The specs are merged left-to-right: later entries win for any field both
+/// define.  The merged result must satisfy every required field.
+///
+/// `group` accepts either a YAML scalar (`group: my-group`) or a YAML
+/// sequence (`group: [a, b]`) for maximum authoring convenience.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct RuleYaml {
-    group: String,
-    generics: String,
-    specs: String,
+    #[serde(deserialize_with = "string_or_vec")]
+    group: Vec<String>,
+    specs: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Custom YAML deserializer: scalar string  OR  sequence of strings
+// ---------------------------------------------------------------------------
+
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or a sequence of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +254,6 @@ struct GcpRoot {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct GcpYaml {
     group: Vec<GroupYaml>,
-    generics: Vec<GenericYaml>,
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
     credentials: GcpCredentialsYaml,
@@ -190,7 +267,6 @@ struct DoRoot {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct DoYaml {
     group: Vec<GroupYaml>,
-    generics: Vec<GenericYaml>,
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
     credentials: DoCredentialsYaml,
@@ -202,7 +278,6 @@ struct DoYaml {
 
 struct CommonConfig {
     groups: Vec<GroupYaml>,
-    generics: Vec<GenericYaml>,
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
 }
@@ -285,7 +360,6 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
         Ok(LoadedProvider::Gcp {
             common: CommonConfig {
                 groups: yaml.group,
-                generics: yaml.generics,
                 specs: yaml.specs,
                 rules: yaml.rules,
             },
@@ -311,7 +385,6 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
         Ok(LoadedProvider::DigitalOcean {
             common: CommonConfig {
                 groups: yaml.group,
-                generics: yaml.generics,
                 specs: yaml.specs,
                 rules: yaml.rules,
             },
@@ -328,54 +401,142 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
 }
 
 // ---------------------------------------------------------------------------
-// Spec validation
+// Spec validation (pre-merge, informational only)
 // ---------------------------------------------------------------------------
 
 fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Error>> {
-    for spec_yaml in specs {
-        for (i, cfg) in spec_yaml.config.iter().enumerate() {
-            match cfg.ip_address {
-                IpAddressType::Public | IpAddressType::Private => {}
-            }
-
-            println!(
-                "  spec '{}' [{}]: ip-address = {}",
-                spec_yaml.name, i, cfg.ip_address
-            );
+    for spec in specs {
+        for (i, cfg) in spec.config.iter().enumerate() {
+            let ip_str = cfg
+                .ip_address
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "private (default)".to_string());
+            println!("  spec '{}' [{}]: ip-address = {}", spec.name, i, ip_str);
         }
     }
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
+// Spec merging
+// ---------------------------------------------------------------------------
+
+/// The fully resolved, non-optional view of a node's configuration produced
+/// by merging one or more [`SpecConfigYaml`] entries left-to-right.
+///
+/// Every field is required; `merge_spec_configs` returns an error when any
+/// mandatory field is absent after the merge pass.
+#[derive(Debug, Clone)]
+struct MergedSpec {
+    machine_type: String,
+    boot_disk_image: String,
+    boot_disk_size: u64,
+    /// Defaults to [`IpAddressType::Private`] when no spec sets it.
+    ip_address: IpAddressType,
+    ssh_public_key: String,
+    script: String,
+    user: String,
+    control_plane_endpoint: Option<String>,
+}
+
+/// Merge `spec_names` (in order) from `specs_map` into a single
+/// [`MergedSpec`].  Later entries override earlier ones for any field both
+/// define.
+fn merge_spec_configs(
+    spec_names: &[String],
+    specs_map: &HashMap<&str, &SpecConfigYaml>,
+) -> Result<MergedSpec, Box<dyn std::error::Error>> {
+    let mut machine_type: Option<String> = None;
+    let mut boot_disk_image: Option<String> = None;
+    let mut boot_disk_size: Option<u64> = None;
+    let mut ip_address: Option<IpAddressType> = None;
+    let mut ssh_public_key: Option<String> = None;
+    let mut script: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut control_plane_endpoint: Option<String> = None;
+
+    for name in spec_names {
+        let cfg = specs_map
+            .get(name.as_str())
+            .ok_or_else(|| format!("Rule references unknown spec '{name}'"))?;
+
+        if let Some(v) = &cfg.machine_type {
+            machine_type = Some(v.clone());
+        }
+        if let Some(v) = &cfg.boot_disk_image {
+            boot_disk_image = Some(v.clone());
+        }
+        if let Some(v) = cfg.boot_disk_size {
+            boot_disk_size = Some(v);
+        }
+        if let Some(v) = cfg.ip_address {
+            ip_address = Some(v);
+        }
+        if let Some(v) = &cfg.ssh_public_key {
+            ssh_public_key = Some(v.clone());
+        }
+        if let Some(v) = &cfg.script {
+            script = Some(v.clone());
+        }
+        if let Some(v) = &cfg.user {
+            user = Some(v.clone());
+        }
+        if let Some(v) = &cfg.control_plane_endpoint {
+            control_plane_endpoint = Some(v.clone());
+        }
+    }
+
+    Ok(MergedSpec {
+        machine_type: machine_type
+            .ok_or_else(|| format!("No 'machine-type' found after merging specs {spec_names:?}"))?,
+        boot_disk_image: boot_disk_image.ok_or_else(|| {
+            format!("No 'boot-disk-image' found after merging specs {spec_names:?}")
+        })?,
+        boot_disk_size: boot_disk_size.ok_or_else(|| {
+            format!("No 'boot-disk-size' found after merging specs {spec_names:?}")
+        })?,
+        ip_address: ip_address.unwrap_or_default(),
+        ssh_public_key: ssh_public_key.ok_or_else(|| {
+            format!("No 'ssh-public-key' found after merging specs {spec_names:?}")
+        })?,
+        script: script
+            .ok_or_else(|| format!("No 'script' found after merging specs {spec_names:?}"))?,
+        user: user.ok_or_else(|| format!("No 'user' found after merging specs {spec_names:?}"))?,
+        control_plane_endpoint,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Rule resolution (provider-agnostic)
 // ---------------------------------------------------------------------------
 
-struct ResolvedRule<'a> {
-    group_name: &'a str,
-    generics_name: &'a str,
-    specs_name: &'a str,
-    nodes: &'a [String],
-    generic: &'a GenericConfigYaml,
-    spec: &'a SpecConfigYaml,
+/// The fully resolved view of a single rule: group metadata, the ordered list
+/// of spec names, all node names collected from the referenced groups, and the
+/// merged spec ready for use.
+struct ResolvedRule {
+    /// Names of every group referenced by this rule.
+    group_names: Vec<String>,
+    /// The shared `type` of all groups in this rule (`"control-plane"` /
+    /// `"worker"`).
+    group_type: String,
+    /// Names of every spec referenced by this rule (merge order).
+    spec_names: Vec<String>,
+    /// Every node name collected from all referenced groups.
+    nodes: Vec<String>,
+    /// Result of merging all referenced specs left-to-right.
+    merged: MergedSpec,
 }
 
-fn resolve_rules<'a>(
-    common: &'a CommonConfig,
-) -> Result<Vec<ResolvedRule<'a>>, Box<dyn std::error::Error>> {
-    let groups: HashMap<&str, &[String]> = common
+fn resolve_rules(common: &CommonConfig) -> Result<Vec<ResolvedRule>, Box<dyn std::error::Error>> {
+    // Index groups by name → (type, nodes)
+    let groups: HashMap<&str, (&str, &[String])> = common
         .groups
         .iter()
-        .map(|g| (g.name.as_str(), g.node.as_slice()))
+        .map(|g| (g.name.as_str(), (g.group_type.as_str(), g.node.as_slice())))
         .collect();
 
-    let generics: HashMap<&str, &GenericConfigYaml> = common
-        .generics
-        .iter()
-        .filter_map(|g| g.config.first().map(|c| (g.name.as_str(), c)))
-        .collect();
-
-    let specs: HashMap<&str, &SpecConfigYaml> = common
+    // Index specs by name → first config entry
+    let specs_map: HashMap<&str, &SpecConfigYaml> = common
         .specs
         .iter()
         .filter_map(|s| s.config.first().map(|c| (s.name.as_str(), c)))
@@ -385,22 +546,43 @@ fn resolve_rules<'a>(
         .rules
         .iter()
         .map(|rule| {
-            let nodes = *groups
-                .get(rule.group.as_str())
-                .ok_or_else(|| format!("Rule references unknown group '{}'", rule.group))?;
-            let generic = *generics
-                .get(rule.generics.as_str())
-                .ok_or_else(|| format!("Rule references unknown generics '{}'", rule.generics))?;
-            let spec = *specs
-                .get(rule.specs.as_str())
-                .ok_or_else(|| format!("Rule references unknown specs '{}'", rule.specs))?;
+            // Collect nodes and validate that all groups share the same type
+            let mut nodes: Vec<String> = Vec::new();
+            let mut resolved_type: Option<&str> = None;
+
+            for gname in &rule.group {
+                let (gtype, gnodes) = groups
+                    .get(gname.as_str())
+                    .ok_or_else(|| format!("Rule references unknown group '{gname}'"))?;
+
+                if let Some(existing) = resolved_type {
+                    if existing != *gtype {
+                        return Err(format!(
+                            "Rule mixes groups of different types: \
+                             '{existing}' (previous) vs '{gtype}' ('{gname}')"
+                        )
+                        .into());
+                    }
+                } else {
+                    resolved_type = Some(gtype);
+                }
+
+                nodes.extend(gnodes.iter().cloned());
+            }
+
+            let group_type = resolved_type
+                .ok_or_else(|| "Rule has an empty group list".to_string())?
+                .to_string();
+
+            // Merge specs
+            let merged = merge_spec_configs(&rule.specs, &specs_map)?;
+
             Ok(ResolvedRule {
-                group_name: &rule.group,
-                generics_name: &rule.generics,
-                specs_name: &rule.specs,
+                group_names: rule.group.clone(),
+                group_type,
+                spec_names: rule.specs.clone(),
                 nodes,
-                generic,
-                spec,
+                merged,
             })
         })
         .collect()
@@ -426,18 +608,23 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut total = 0usize;
     for r in &resolved {
         println!(
-            "\n  group: {}  (generics: {}, specs: {})",
-            r.group_name, r.generics_name, r.specs_name
+            "\n  groups: [{}]  type: {}  (specs: [{}])",
+            r.group_names.join(", "),
+            r.group_type,
+            r.spec_names.join(", "),
         );
         println!(
             "    machine-type: {}  image: {}  disk: {} GB  ip-address: {}",
-            r.spec.machine_type, r.spec.boot_disk_image, r.spec.boot_disk_size, r.spec.ip_address
+            r.merged.machine_type,
+            r.merged.boot_disk_image,
+            r.merged.boot_disk_size,
+            r.merged.ip_address,
         );
         println!(
             "    user: {}  ssh-public-key: {}",
-            r.generic.user, r.generic.ssh_public_key
+            r.merged.user, r.merged.ssh_public_key
         );
-        for node in r.nodes {
+        for node in &r.nodes {
             println!("      • {node}");
             total += 1;
         }
@@ -452,28 +639,29 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     for r in &resolved {
         println!(
-            "\n── Group: {} ─────────────────────────────────────────────────────",
-            r.group_name
+            "\n── Groups: [{}] ({}) ─────────────────────────────────────────────────────",
+            r.group_names.join(", "),
+            r.group_type,
         );
 
-        let ssh_meta = read_ssh_public_key(&r.generic.ssh_public_key)
-            .map(|k| format!("{}:{k}", r.generic.user))
+        let ssh_meta = read_ssh_public_key(&r.merged.ssh_public_key)
+            .map(|k| format!("{}:{k}", r.merged.user))
             .unwrap_or_else(|e| {
                 eprintln!("  ⚠ Could not read SSH public key: {e}");
                 String::new()
             });
 
-        let assign_public_ip = r.spec.ip_address == IpAddressType::Public;
+        let assign_public_ip = r.merged.ip_address == IpAddressType::Public;
 
-        for node in r.nodes {
+        for node in &r.nodes {
             println!("\n  ── Creating instance: {node} ──");
             let resp = provider.create_vm(
                 node,
-                &r.spec.machine_type,
-                &r.spec.boot_disk_image,
-                r.spec.boot_disk_size,
+                &r.merged.machine_type,
+                &r.merged.boot_disk_image,
+                r.merged.boot_disk_size,
                 &ssh_meta,
-                &r.generic.script,
+                &r.merged.script,
                 assign_public_ip,
             )?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -500,11 +688,11 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n── Instances to destroy ─────────────────────────────────────────────────");
 
-    let mut all_nodes: Vec<(&str, &str)> = Vec::new();
+    let mut all_nodes: Vec<(&str, &str, &str)> = Vec::new(); // (group_name, group_type, node)
     for group in &common.groups {
         for node in &group.node {
-            println!("  {}  →  {}", group.name, node);
-            all_nodes.push((&group.name, node));
+            println!("  [{}] {}  →  {}", group.group_type, group.name, node);
+            all_nodes.push((&group.name, &group.group_type, node));
         }
     }
 
@@ -520,8 +708,8 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let provider = loaded.provider();
 
-    for (group_name, node) in &all_nodes {
-        println!("\n  ── Deleting [{group_name}] {node} ──");
+    for (group_name, group_type, node) in &all_nodes {
+        println!("\n  ── Deleting [{group_type}/{group_name}] {node} ──");
         match provider.destroy_vm(node) {
             Ok(body) => println!("{}", serde_json::to_string_pretty(&body)?),
             Err(e) => eprintln!("  ✗ Failed to delete {node}: {e}"),
@@ -686,23 +874,10 @@ fn ssh_run_jump(
 
 // ---------------------------------------------------------------------------
 // Control-plane provisioning steps
-//
-// Mirrors the three actions that `cisak install --control-plane` used to
-// perform, now run as individual SSH commands so maglev owns the logic
-// directly and no longer depends on the deprecated cisak subcommand.
-//
-//  1. sudo kubeadm init  [--control-plane-endpoint <ep> --upload-certs]
-//  2. cilium --kubeconfig /etc/kubernetes/admin.conf install
-//  3. cilium --kubeconfig /etc/kubernetes/admin.conf status --wait
 // ---------------------------------------------------------------------------
 
 const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
 
-/// Run the three control-plane bootstrap steps on `cp_ip` via SSH.
-///
-/// Each step is shown to the operator before execution and can be skipped
-/// individually.  If the operator skips `kubeadm init` the function returns
-/// immediately — there is nothing useful to do without an initialised cluster.
 fn provision_control_plane_node(
     cp_ip: &str,
     cp_name: &str,
@@ -712,12 +887,6 @@ fn provision_control_plane_node(
     is_ha: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
-    //
-    // For HA clusters (≥ 3 control-plane nodes) we pass:
-    //   --control-plane-endpoint  so all nodes share a stable API address
-    //   --upload-certs            so joining CP nodes can pull certificates
-    //                             automatically instead of requiring manual
-    //                             distribution
     let kubeadm_init_cmd = if is_ha {
         format!(
             "sudo kubeadm init \
@@ -741,10 +910,6 @@ fn provision_control_plane_node(
     println!("\n  ✓ kubeadm init complete.");
 
     // ── Step B: cilium install ────────────────────────────────────────────────
-    //
-    // The Cilium CLI binary is already on the node (installed by cisak install
-    // -y via the startup script).  We pass --kubeconfig explicitly so the
-    // command works even before ~/.kube/config is set up for the SSH user.
     let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
 
     println!("\n  → Step B: deploy Cilium CNI");
@@ -759,10 +924,6 @@ fn provision_control_plane_node(
     println!("\n  ✓ Cilium CNI installed.");
 
     // ── Step C: cilium status --wait ──────────────────────────────────────────
-    //
-    // Blocks until all Cilium components report healthy.  This ensures the
-    // cluster's networking layer is fully operational before maglev attempts
-    // to join worker (or additional control-plane) nodes.
     let cilium_status_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait");
 
     println!("\n  → Step C: wait for Cilium to become ready");
@@ -792,62 +953,55 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let common = loaded.common();
     let provider = loaded.provider();
 
-    let default_generic = common
-        .generics
-        .iter()
-        .find(|g| g.name == "default")
-        .and_then(|g| g.config.first())
-        .ok_or("No 'default' generics entry found in config")?;
-
-    let ssh_user = &default_generic.user;
-    let ssh_pub_path = default_generic.ssh_public_key.as_str();
-    let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
-
     println!("\n── Provider settings ────────────────────────────────────────────────────");
     loaded.describe();
 
-    // ── Build group → prefer_public map ──────────────────────────────────────
-    let group_prefer_public: HashMap<&str, bool> = common
-        .rules
-        .iter()
-        .filter_map(|rule| {
-            let ip_type = common
-                .specs
-                .iter()
-                .find(|s| s.name == rule.specs)
-                .and_then(|s| s.config.first())
-                .map(|c| c.ip_address)
-                .unwrap_or(IpAddressType::Private);
-            Some((rule.group.as_str(), ip_type == IpAddressType::Public))
-        })
-        .collect();
+    let resolved = resolve_rules(common)?;
 
-    let cp_prefer_public = *group_prefer_public.get("control-plane").unwrap_or(&false);
-    let worker_prefer_public = *group_prefer_public.get("worker").unwrap_or(&false);
+    // ── Partition resolved rules into CP and worker node lists ────────────────
+    //
+    // Each entry carries:  (node_name, prefer_public)
+    // The SSH config (user, key, control-plane-endpoint) is taken from the
+    // first control-plane rule's merged spec — all rules in the example share
+    // the same `cisak` base spec so these values are identical across the
+    // cluster.
+    let mut cp_entries: Vec<(String, bool)> = Vec::new();
+    let mut worker_entries: Vec<(String, bool)> = Vec::new();
+    let mut first_cp_merged: Option<&MergedSpec> = None;
 
-    // ── Collect node lists ────────────────────────────────────────────────────
-    let cp_nodes: Vec<&str> = common
-        .rules
-        .iter()
-        .find(|r| r.group == "control-plane")
-        .and_then(|r| common.groups.iter().find(|g| g.name == r.group))
-        .map(|g| g.node.iter().map(String::as_str).collect())
-        .unwrap_or_default();
+    for rule in &resolved {
+        let prefer_public = rule.merged.ip_address == IpAddressType::Public;
+        match rule.group_type.as_str() {
+            "control-plane" => {
+                if first_cp_merged.is_none() {
+                    first_cp_merged = Some(&rule.merged);
+                }
+                for node in &rule.nodes {
+                    cp_entries.push((node.clone(), prefer_public));
+                }
+            }
+            "worker" => {
+                for node in &rule.nodes {
+                    worker_entries.push((node.clone(), prefer_public));
+                }
+            }
+            other => {
+                eprintln!("  ⚠ Unknown group type '{other}' — skipping in play.");
+            }
+        }
+    }
 
-    let worker_nodes: Vec<&str> = common
-        .rules
-        .iter()
-        .find(|r| r.group == "worker")
-        .and_then(|r| common.groups.iter().find(|g| g.name == r.group))
-        .map(|g| g.node.iter().map(String::as_str).collect())
-        .unwrap_or_default();
+    let first_cp_merged = first_cp_merged.ok_or("No control-plane rules found in config")?;
 
-    let cp_count = cp_nodes.len();
+    let ssh_user = &first_cp_merged.user;
+    let ssh_pub_path = first_cp_merged.ssh_public_key.as_str();
+    let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
+    // ── Cluster-size checks ───────────────────────────────────────────────────
+    let cp_count = cp_entries.len();
     if cp_count == 0 {
         return Err("No control-plane nodes found in config.".into());
     }
-
     if cp_count == 1 {
         println!(
             "\n  ℹ  INFO: Single control-plane node — this cluster will \
@@ -863,52 +1017,48 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let is_ha = cp_count >= 3;
 
-    let use_jump_for_workers = !worker_prefer_public && cp_prefer_public;
-    if use_jump_for_workers {
+    // Primary CP node is the first one in document order.
+    let primary_cp_prefer_public = cp_entries[0].1;
+
+    // A worker whose own IP is private and whose reachability depends on
+    // tunnelling through the (public) primary CP node needs ProxyJump.
+    let any_worker_needs_jump =
+        worker_entries.iter().any(|(_, pp)| !pp) && primary_cp_prefer_public;
+
+    if any_worker_needs_jump {
         println!(
-            "\n  ℹ  Workers have private IPs and control-plane has public IPs. \
-             Worker SSH will be routed through the primary control-plane node \
-             (ProxyJump / SSH agent forwarding)."
+            "\n  ℹ  Some workers have private IPs and the primary control-plane has a \
+             public IP. Private-worker SSH will be routed through the primary \
+             control-plane node via ProxyJump."
         );
     }
 
     // ── Resolve IPs ───────────────────────────────────────────────────────────
     println!("\n  Fetching IPs …");
-    println!(
-        "  control-plane ip-address: {}",
-        if cp_prefer_public {
-            "public"
-        } else {
-            "private"
-        }
-    );
-    println!(
-        "  worker        ip-address: {}",
-        if worker_prefer_public {
-            "public"
-        } else {
-            "private"
-        }
-    );
 
-    let resolve_ips = |nodes: &[&str],
-                       prefer_public: bool|
-     -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-        nodes
-            .iter()
-            .map(|&name| {
-                let ip = provider.get_vm_ip(name, prefer_public)?;
-                println!(
-                    "  {name:<30} →  {ip}  ({})",
-                    if prefer_public { "public" } else { "private" }
-                );
-                Ok((name.to_string(), ip))
-            })
-            .collect()
-    };
+    let cp_with_ips: Vec<(String, String)> = cp_entries
+        .iter()
+        .map(|(name, prefer_public)| {
+            let ip = provider.get_vm_ip(name, *prefer_public)?;
+            println!(
+                "  {name:<30} →  {ip}  ({})",
+                if *prefer_public { "public" } else { "private" }
+            );
+            Ok((name.clone(), ip))
+        })
+        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
 
-    let cp_with_ips: Vec<(String, String)> = resolve_ips(&cp_nodes, cp_prefer_public)?;
-    let worker_with_ips: Vec<(String, String)> = resolve_ips(&worker_nodes, worker_prefer_public)?;
+    let worker_with_ips: Vec<(String, String)> = worker_entries
+        .iter()
+        .map(|(name, prefer_public)| {
+            let ip = provider.get_vm_ip(name, *prefer_public)?;
+            println!(
+                "  {name:<30} →  {ip}  ({})",
+                if *prefer_public { "public" } else { "private" }
+            );
+            Ok((name.clone(), ip))
+        })
+        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
 
     println!("  SSH user: {ssh_user}  private key: {ssh_priv_path}");
 
@@ -917,7 +1067,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("No control-plane nodes available")?;
 
     // ── Determine the stable control-plane endpoint ───────────────────────────
-    let cp_endpoint: String = match &default_generic.control_plane_endpoint {
+    let cp_endpoint: String = match &first_cp_merged.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
             let ep = ep.trim().to_string();
             if ep.contains(':') {
@@ -938,7 +1088,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
              This works but is not truly highly available — if that node is lost \
              the API server becomes unreachable.\n\
              Consider adding a load-balancer and setting 'control-plane-endpoint' \
-             in the generics block of your config."
+             in the relevant spec block of your config."
         );
     }
 
@@ -947,15 +1097,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
 
     if prompt_yes_no(&format!("  SSH-check and provision {primary_cp_name}?")) {
-        // ── NEW: verify DNS before anything touches kubeadm ──────────────────
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
-            primary_cp_ip, // temporary stand-in for the real LB
+            primary_cp_ip,
             |cmd| ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
             |cmd| ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
         )?;
-        // ─────────────────────────────────────────────────────────────────────
 
         let already_init = ssh_capture(
             primary_cp_ip,
@@ -966,7 +1114,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         if already_init.trim() == "yes" {
             println!("  ✓ {primary_cp_name} already initialised — skipping.");
-
             if is_ha {
                 verify_control_plane_endpoint(
                     primary_cp_ip,
@@ -1021,7 +1168,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        for (idx, (name, ip)) in cp_with_ips.iter().skip(1).enumerate() {
+        // cp_entries[1..] parallel-tracks cp_with_ips[1..]
+        for (idx, ((name, ip), (_, prefer_public))) in cp_with_ips
+            .iter()
+            .skip(1)
+            .zip(cp_entries.iter().skip(1))
+            .enumerate()
+        {
             println!("\n  [{}/{}] {name}  ({ip})", idx + 2, cp_with_ips.len());
 
             if !prompt_yes_no(&format!("  Check and join {name} as control-plane?")) {
@@ -1029,7 +1182,10 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            // ── NEW ──────────────────────────────────────────────────────────
+            // Additional CP nodes that have private IPs are assumed to be
+            // reachable directly (VPN / internal routing).  If they are not,
+            // the operator will see an SSH timeout here.
+            let _ = prefer_public; // used only to choose ip — already reflected in `ip`
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
@@ -1037,7 +1193,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
                 |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
             )?;
-            // ─────────────────────────────────────────────────────────────────
 
             let already_joined = ssh_capture(
                 ip,
@@ -1076,13 +1231,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         worker_with_ips.len()
     );
 
-    if use_jump_for_workers {
-        println!(
-            "  Routing worker SSH through {primary_cp_name} ({primary_cp_ip}) \
-             via ProxyJump."
-        );
-    }
-
     let worker_join_cmd = match ssh_capture(
         primary_cp_ip,
         ssh_user,
@@ -1100,16 +1248,27 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    for (idx, (name, ip)) in worker_with_ips.iter().enumerate() {
+    // worker_entries[i] and worker_with_ips[i] are aligned
+    for (idx, ((name, ip), (_, prefer_public))) in worker_with_ips
+        .iter()
+        .zip(worker_entries.iter())
+        .enumerate()
+    {
+        let needs_jump = !prefer_public && primary_cp_prefer_public;
+
         println!("\n  [{}/{}] {name}  ({ip})", idx + 1, worker_with_ips.len());
+
+        if needs_jump {
+            println!("    (routing through {primary_cp_name} @ {primary_cp_ip} via ProxyJump)");
+        }
 
         if !prompt_yes_no("  Fetch join command and join?") {
             println!("  Skipped.");
             continue;
         }
 
-        // ── NEW: DNS guard — direct or via jump depending on topology ────────
-        if use_jump_for_workers {
+        // DNS guard — use the appropriate SSH path per worker topology
+        if needs_jump {
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
@@ -1126,7 +1285,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
             )?;
         }
-        // ─────────────────────────────────────────────────────────────────────
 
         if worker_join_cmd.is_empty() {
             eprintln!("  ✗ No join command available — skipping {name}.");
@@ -1135,7 +1293,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         println!("  Join command: {worker_join_cmd}");
 
-        let already_joined = if use_jump_for_workers {
+        let already_joined = if needs_jump {
             ssh_capture_jump(
                 primary_cp_ip,
                 ssh_user,
@@ -1164,7 +1322,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n  Joining {name} …\n");
         let join_full = format!("sudo {worker_join_cmd}");
 
-        let result = if use_jump_for_workers {
+        let result = if needs_jump {
             ssh_run_jump(
                 primary_cp_ip,
                 ssh_user,
@@ -1251,9 +1409,8 @@ fn verify_control_plane_endpoint(
              --control-plane-endpoint {expected_endpoint} --upload-certs\n\
              \n\
              To use a dedicated load-balancer address instead of the primary \
-             node's IP, add to the generics block in your config:\n\
-             \n\
-             \tcontrol-plane-endpoint: \"<lb-address-or-dns>\""
+             node's IP, add 'control-plane-endpoint' to the relevant spec block \
+             in your config."
         )
         .into());
     }
@@ -1331,7 +1488,6 @@ fn ensure_cp_endpoint_resolves(
     if prompt_yes_no(&format!(
         "  Add '{fallback_ip}  {host}' to /etc/hosts on {node_name}?"
     )) {
-        // grep guards against duplicate lines on re-runs.
         run(&format!(
             "grep -qF '{host}' /etc/hosts \
              || echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
