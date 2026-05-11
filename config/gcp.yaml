@@ -25,7 +25,7 @@ gcp:
         cisak-v0.1.11-linux-amd64.tar.gz | tar -xz
         install -m 755 -o root -g root cisak /usr/local/bin/cisak
         cisak generate
-        cisak install "path/to/private-key.pem"
+        cisak install -y
   specs:
   - name: control-plane
     config:
