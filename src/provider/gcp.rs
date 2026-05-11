@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
-// Credential types (used by the credential-builder flow)
+// Credential types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,7 +20,6 @@ struct ServiceAccountCredentials {
     client_email: String,
 }
 
-/// Raw credential data read from the YAML config.
 #[derive(Debug, Clone)]
 pub struct GcpCredentials {
     pub client_email: String,
@@ -34,9 +33,6 @@ pub struct GcpCredentials {
 // GcpProvider — implements Provider
 // ---------------------------------------------------------------------------
 
-/// A ready-to-use GCP client.  Construct it with [`GcpProvider::new`]; that
-/// call signs a JWT, exchanges it for an OAuth2 access token, and stores
-/// everything needed for subsequent API calls.
 pub struct GcpProvider {
     access_token: String,
     project_id: String,
@@ -67,35 +63,6 @@ impl GcpProvider {
             project_id: creds.project_id.clone(),
             zone: creds.zone.clone(),
         })
-    }
-
-    /// Fetch the **internal** IP of an instance (used by `play`).
-    pub fn get_vm_ip(&self, instance_name: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let url = format!(
-            "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}",
-            self.project_id, self.zone, instance_name
-        );
-
-        let agent = build_agent();
-        let mut resp = agent
-            .get(&url)
-            .header("Authorization", &format!("Bearer {}", self.access_token))
-            .call()?;
-
-        let status = resp.status();
-        let body: Value = resp.body_mut().read_json()?;
-
-        if !status.is_success() {
-            return Err(format!(
-                "Compute Engine API returned HTTP {status} while fetching '{instance_name}': {body}"
-            )
-            .into());
-        }
-
-        body["networkInterfaces"][0]["networkIP"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("No internal IP found for instance '{instance_name}'").into())
     }
 }
 
@@ -185,6 +152,34 @@ impl Provider for GcpProvider {
         }
 
         Ok(body)
+    }
+
+    fn get_vm_ip(&self, instance_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}",
+            self.project_id, self.zone, instance_name
+        );
+
+        let agent = build_agent();
+        let mut resp = agent
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.access_token))
+            .call()?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "Compute Engine API returned HTTP {status} while fetching '{instance_name}': {body}"
+            )
+            .into());
+        }
+
+        body["networkInterfaces"][0]["networkIP"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("No internal IP found for instance '{instance_name}'").into())
     }
 }
 

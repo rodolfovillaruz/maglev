@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 
 use provider::{
     Provider,
+    digitalocean::{DigitalOceanCredentials, DigitalOceanProvider},
     gcp::{GcpCredentials, GcpProvider, print_build_credential},
 };
 use utils::{expand_tilde, prompt_yes_no, read_ssh_public_key};
@@ -17,12 +18,12 @@ use utils::{expand_tilde, prompt_yes_no, read_ssh_public_key};
 // CLI
 // ---------------------------------------------------------------------------
 
-/// Maglev — GCP Kubernetes cluster manager
+/// Maglev — multi-cloud Kubernetes cluster manager
 #[derive(Parser)]
 #[command(
     name = "maglev",
     version,
-    about = "Provision and manage GCP-backed Kubernetes clusters"
+    about = "Provision and manage cloud-backed Kubernetes clusters"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,13 +32,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create VM instances described by a config/gcp.yaml
+    /// Create VM instances described by a provider YAML config
     Apply {
-        /// Path to the YAML config file
+        /// Path to the YAML config file (gcp.yaml or digitalocean.yaml)
         #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
-    /// Permanently delete VM instances described by a config/gcp.yaml
+    /// Permanently delete VM instances described by a provider YAML config
     Destroy {
         /// Path to the YAML config file
         #[arg(default_value = "config/gcp.yaml")]
@@ -49,27 +50,13 @@ enum Commands {
         #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
-    /// Run the interactive credential builder
+    /// Run the interactive GCP credential builder
     Print,
 }
 
 // ---------------------------------------------------------------------------
-// YAML config types  (mirror config/gcp.yaml)
+// Shared YAML types (identical structure across providers)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct YamlRoot {
-    gcp: GcpYaml,
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct GcpYaml {
-    group: Vec<GroupYaml>,
-    generics: Vec<GenericYaml>,
-    specs: Vec<SpecYaml>,
-    rules: Vec<RuleYaml>,
-    credentials: CredentialsYaml,
-}
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct GroupYaml {
@@ -113,8 +100,12 @@ struct RuleYaml {
     specs: String,
 }
 
+// ---------------------------------------------------------------------------
+// Provider-specific credential types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct CredentialsYaml {
+struct GcpCredentialsYaml {
     #[serde(rename = "client-email")]
     client_email: String,
     #[serde(rename = "private-key")]
@@ -124,45 +115,215 @@ struct CredentialsYaml {
     zone: String,
 }
 
-// ---------------------------------------------------------------------------
-// Config helpers
-// ---------------------------------------------------------------------------
-
-fn load_yaml(path: &str) -> Result<YamlRoot, Box<dyn std::error::Error>> {
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("Cannot read config file '{path}': {e}"))?;
-    serde_yaml::from_str(&content).map_err(|e| format!("YAML parse error in '{path}': {e}").into())
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct DoCredentialsYaml {
+    token: String,
+    region: String,
 }
 
-/// Resolve a rule into its concrete (nodes, generic_config, spec_config) triple.
+// ---------------------------------------------------------------------------
+// Per-provider YAML roots
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct GcpRoot {
+    gcp: GcpYaml,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct GcpYaml {
+    group: Vec<GroupYaml>,
+    generics: Vec<GenericYaml>,
+    specs: Vec<SpecYaml>,
+    rules: Vec<RuleYaml>,
+    credentials: GcpCredentialsYaml,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct DoRoot {
+    digitalocean: DoYaml,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct DoYaml {
+    group: Vec<GroupYaml>,
+    generics: Vec<GenericYaml>,
+    specs: Vec<SpecYaml>,
+    rules: Vec<RuleYaml>,
+    credentials: DoCredentialsYaml,
+}
+
+// ---------------------------------------------------------------------------
+// Unified view of a loaded config (provider-agnostic body + typed creds)
+// ---------------------------------------------------------------------------
+
+/// Everything from a YAML file that doesn't depend on which cloud is chosen.
+struct CommonConfig {
+    groups: Vec<GroupYaml>,
+    generics: Vec<GenericYaml>,
+    specs: Vec<SpecYaml>,
+    rules: Vec<RuleYaml>,
+}
+
+/// What kind of provider was detected and the matching provider instance.
+enum LoadedProvider {
+    Gcp {
+        common: CommonConfig,
+        /// Human-readable location string for progress messages.
+        location: String,
+        /// Service-account e-mail (shown in summaries).
+        identity: String,
+        provider: GcpProvider,
+    },
+    DigitalOcean {
+        common: CommonConfig,
+        /// Region slug (shown in summaries).
+        location: String,
+        provider: DigitalOceanProvider,
+    },
+}
+
+impl LoadedProvider {
+    fn common(&self) -> &CommonConfig {
+        match self {
+            LoadedProvider::Gcp { common, .. } => common,
+            LoadedProvider::DigitalOcean { common, .. } => common,
+        }
+    }
+
+    fn provider(&self) -> &dyn Provider {
+        match self {
+            LoadedProvider::Gcp { provider, .. } => provider,
+            LoadedProvider::DigitalOcean { provider, .. } => provider,
+        }
+    }
+
+    fn describe(&self) {
+        match self {
+            LoadedProvider::Gcp {
+                location, identity, ..
+            } => {
+                println!("  Provider:        GCP");
+                println!("  Zone:            {location}");
+                println!("  Service account: {identity}");
+            }
+            LoadedProvider::DigitalOcean { location, .. } => {
+                println!("  Provider:        DigitalOcean");
+                println!("  Region:          {location}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config loading + provider detection
+// ---------------------------------------------------------------------------
+
+/// Inspect the top-level key of a YAML file to decide which provider to use,
+/// then parse it fully and build the authenticated provider client.
+fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error>> {
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("Cannot read config file '{path}': {e}"))?;
+
+    // Peek at the raw YAML to find the top-level discriminator key.
+    let raw: serde_yaml::Value =
+        serde_yaml::from_str(&content).map_err(|e| format!("YAML parse error in '{path}': {e}"))?;
+
+    if raw.get("gcp").is_some() {
+        let root: GcpRoot = serde_yaml::from_str(&content)
+            .map_err(|e| format!("GCP YAML parse error in '{path}': {e}"))?;
+        let yaml = root.gcp;
+
+        let creds = GcpCredentials {
+            client_email: yaml.credentials.client_email.clone(),
+            private_key_path: expand_tilde(&yaml.credentials.private_key),
+            project_id: yaml.credentials.project_id.clone(),
+            zone: yaml.credentials.zone.clone(),
+        };
+
+        let location = creds.zone.clone();
+        let identity = creds.client_email.clone();
+        let provider = GcpProvider::new(&creds)?;
+
+        Ok(LoadedProvider::Gcp {
+            common: CommonConfig {
+                groups: yaml.group,
+                generics: yaml.generics,
+                specs: yaml.specs,
+                rules: yaml.rules,
+            },
+            location,
+            identity,
+            provider,
+        })
+    } else if raw.get("digitalocean").is_some() {
+        let root: DoRoot = serde_yaml::from_str(&content)
+            .map_err(|e| format!("DigitalOcean YAML parse error in '{path}': {e}"))?;
+        let yaml = root.digitalocean;
+
+        let creds = DigitalOceanCredentials {
+            token: yaml.credentials.token.clone(),
+            region: yaml.credentials.region.clone(),
+        };
+
+        let location = creds.region.clone();
+        let provider = DigitalOceanProvider::new(&creds)?;
+
+        Ok(LoadedProvider::DigitalOcean {
+            common: CommonConfig {
+                groups: yaml.group,
+                generics: yaml.generics,
+                specs: yaml.specs,
+                rules: yaml.rules,
+            },
+            location,
+            provider,
+        })
+    } else {
+        Err(format!(
+            "Cannot detect provider in '{path}': \
+             YAML must have a top-level 'gcp' or 'digitalocean' key"
+        )
+        .into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule resolution (provider-agnostic)
+// ---------------------------------------------------------------------------
+
 struct ResolvedRule<'a> {
+    group_name: &'a str,
+    generics_name: &'a str,
+    specs_name: &'a str,
     nodes: &'a [String],
     generic: &'a GenericConfigYaml,
     spec: &'a SpecConfigYaml,
 }
 
 fn resolve_rules<'a>(
-    cfg: &'a GcpYaml,
+    common: &'a CommonConfig,
 ) -> Result<Vec<ResolvedRule<'a>>, Box<dyn std::error::Error>> {
-    let groups: HashMap<&str, &[String]> = cfg
-        .group
+    let groups: HashMap<&str, &[String]> = common
+        .groups
         .iter()
         .map(|g| (g.name.as_str(), g.node.as_slice()))
         .collect();
 
-    let generics: HashMap<&str, &GenericConfigYaml> = cfg
+    let generics: HashMap<&str, &GenericConfigYaml> = common
         .generics
         .iter()
         .filter_map(|g| g.config.first().map(|c| (g.name.as_str(), c)))
         .collect();
 
-    let specs: HashMap<&str, &SpecConfigYaml> = cfg
+    let specs: HashMap<&str, &SpecConfigYaml> = common
         .specs
         .iter()
         .filter_map(|s| s.config.first().map(|c| (s.name.as_str(), c)))
         .collect();
 
-    cfg.rules
+    common
+        .rules
         .iter()
         .map(|rule| {
             let nodes = *groups
@@ -175,187 +336,15 @@ fn resolve_rules<'a>(
                 .get(rule.specs.as_str())
                 .ok_or_else(|| format!("Rule references unknown specs '{}'", rule.specs))?;
             Ok(ResolvedRule {
+                group_name: &rule.group,
+                generics_name: &rule.generics,
+                specs_name: &rule.specs,
                 nodes,
                 generic,
                 spec,
             })
         })
         .collect()
-}
-
-fn credentials_from_yaml(c: &CredentialsYaml) -> GcpCredentials {
-    GcpCredentials {
-        client_email: c.client_email.clone(),
-        private_key_path: expand_tilde(&c.private_key),
-        project_id: c.project_id.clone(),
-        zone: c.zone.clone(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `generate` subcommand
-// ---------------------------------------------------------------------------
-
-fn env_list(var: &str) -> Option<Vec<String>> {
-    env::var(var).ok().map(|v| {
-        v.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    })
-}
-
-fn generate_config(config_path: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
-    use std::path::Path;
-
-    if !force && Path::new(config_path).exists() {
-        eprintln!("error: '{config_path}' already exists");
-        eprintln!("  Use -f / --force to overwrite.");
-        std::process::exit(1);
-    }
-
-    if let Some(parent) = Path::new(config_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Cannot create directories for '{config_path}': {e}"))?;
-        }
-    }
-
-    // ── Credentials ──────────────────────────────────────────────────────────
-    let client_email = env::var("MAGLEV_CLIENT_EMAIL")
-        .map_err(|_| "MAGLEV_CLIENT_EMAIL environment variable is not set")?;
-
-    let derived_project = client_email
-        .split('@')
-        .nth(1)
-        .and_then(|d| d.split('.').next())
-        .unwrap_or("my-project")
-        .to_string();
-
-    let project_id = env::var("MAGLEV_PROJECT_ID").unwrap_or(derived_project);
-    let private_key =
-        env::var("MAGLEV_PRIVATE_KEY").unwrap_or_else(|_| "path/to/private-key.pem".to_string());
-    let zone = env::var("MAGLEV_ZONE").unwrap_or_else(|_| "us-central1-a".to_string());
-
-    // ── Node names ────────────────────────────────────────────────────────────
-    let cp_names = env_list("MAGLEV_CP_INSTANCES").unwrap_or_else(|| {
-        vec![
-            "maglev-cp-alpha".to_string(),
-            "maglev-cp-beta".to_string(),
-            "maglev-cp-gamma".to_string(),
-        ]
-    });
-
-    let worker_names = env_list("MAGLEV_WORKER_INSTANCES").unwrap_or_else(|| {
-        vec![
-            "maglev-worker-alpha".to_string(),
-            "maglev-worker-beta".to_string(),
-            "maglev-worker-gamma".to_string(),
-        ]
-    });
-
-    // ── SSH key / startup script ──────────────────────────────────────────────
-    let ssh_public_key = env::var("MAGLEV_SSH_PUBLIC_KEY_PATH")
-        .unwrap_or_else(|_| "~/.ssh/id_ed25519.pub".to_string());
-
-    let default_script = "#!/bin/bash\n\
-        set -e\n\n\
-        apt-get update\n\
-        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/\
-        cisak-v0.1.11-linux-amd64.tar.gz | tar -xz\n\
-        install -m 755 -o root -g root cisak /usr/local/bin/cisak\n\
-        cisak generate\n\
-        cisak install -y"
-        .to_string();
-    let script = env::var("MAGLEV_STARTUP_SCRIPT").unwrap_or(default_script);
-
-    // ── Machine specs ─────────────────────────────────────────────────────────
-    let cp_machine_type =
-        env::var("MAGLEV_CP_MACHINE_TYPE").unwrap_or_else(|_| "e2-standard-2".to_string());
-    let cp_boot_disk_image = env::var("MAGLEV_CP_BOOT_DISK_IMAGE")
-        .unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
-    let cp_boot_disk_size: u64 = env::var("MAGLEV_CP_BOOT_DISK_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20);
-
-    let worker_machine_type =
-        env::var("MAGLEV_MACHINE_TYPE").unwrap_or_else(|_| "e2-standard-2".to_string());
-    let worker_boot_disk_image =
-        env::var("MAGLEV_BOOT_DISK_IMAGE").unwrap_or_else(|_| "ubuntu-2404-lts-amd64".to_string());
-    let worker_boot_disk_size: u64 = env::var("MAGLEV_BOOT_DISK_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50);
-
-    // ── Build YAML structure ──────────────────────────────────────────────────
-    let root = YamlRoot {
-        gcp: GcpYaml {
-            group: vec![
-                GroupYaml {
-                    name: "control-plane".to_string(),
-                    node: cp_names.clone(),
-                },
-                GroupYaml {
-                    name: "worker".to_string(),
-                    node: worker_names.clone(),
-                },
-            ],
-            generics: vec![GenericYaml {
-                name: "default".to_string(),
-                config: vec![GenericConfigYaml {
-                    ssh_public_key: ssh_public_key.clone(),
-                    script,
-                }],
-            }],
-            specs: vec![
-                SpecYaml {
-                    name: "control-plane".to_string(),
-                    config: vec![SpecConfigYaml {
-                        machine_type: cp_machine_type,
-                        boot_disk_image: cp_boot_disk_image,
-                        boot_disk_size: cp_boot_disk_size,
-                    }],
-                },
-                SpecYaml {
-                    name: "worker".to_string(),
-                    config: vec![SpecConfigYaml {
-                        machine_type: worker_machine_type,
-                        boot_disk_image: worker_boot_disk_image,
-                        boot_disk_size: worker_boot_disk_size,
-                    }],
-                },
-            ],
-            rules: vec![
-                RuleYaml {
-                    group: "control-plane".to_string(),
-                    generics: "default".to_string(),
-                    specs: "control-plane".to_string(),
-                },
-                RuleYaml {
-                    group: "worker".to_string(),
-                    generics: "default".to_string(),
-                    specs: "worker".to_string(),
-                },
-            ],
-            credentials: CredentialsYaml {
-                client_email,
-                private_key,
-                project_id,
-                zone,
-            },
-        },
-    };
-
-    let yaml_text = serde_yaml::to_string(&root)?;
-    fs::write(config_path, &yaml_text)
-        .map_err(|e| format!("Cannot write config to '{config_path}': {e}"))?;
-
-    println!("✓ Config written to: {config_path}");
-    println!("  control-plane nodes : {}", cp_names.join(", "));
-    println!("  worker nodes        : {}", worker_names.join(", "));
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -366,24 +355,20 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Apply ===\n");
     println!("Reading config: {config_path}");
 
-    let root = load_yaml(config_path)?;
-    let cfg = &root.gcp;
-    let creds = credentials_from_yaml(&cfg.credentials);
+    let loaded = load_provider(config_path)?;
+    let common = loaded.common();
 
-    println!("\n── GCP settings ─────────────────────────────────────────────────────────");
-    println!("  Project:         {}", creds.project_id);
-    println!("  Zone:            {}", creds.zone);
-    println!("  Service account: {}", creds.client_email);
+    println!("\n── Provider settings ────────────────────────────────────────────────────");
+    loaded.describe();
 
-    let resolved = resolve_rules(cfg)?;
+    let resolved = resolve_rules(common)?;
 
     println!("\n── Nodes to create ──────────────────────────────────────────────────────");
     let mut total = 0usize;
-    for (rule_idx, r) in resolved.iter().enumerate() {
-        let rule = &cfg.rules[rule_idx];
+    for r in &resolved {
         println!(
             "\n  group: {}  (generics: {}, specs: {})",
-            rule.group, rule.generics, rule.specs
+            r.group_name, r.generics_name, r.specs_name
         );
         println!(
             "    machine-type: {}  image: {}  disk: {} GB",
@@ -401,13 +386,12 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let provider = GcpProvider::new(&creds)?;
+    let provider = loaded.provider();
 
-    for (rule_idx, r) in resolved.iter().enumerate() {
-        let rule = &cfg.rules[rule_idx];
+    for r in &resolved {
         println!(
             "\n── Group: {} ─────────────────────────────────────────────────────",
-            rule.group
+            r.group_name
         );
 
         let ssh_meta = read_ssh_public_key(&r.generic.ssh_public_key)
@@ -443,18 +427,16 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Destroy ===\n");
     println!("Reading config: {config_path}");
 
-    let root = load_yaml(config_path)?;
-    let cfg = &root.gcp;
-    let creds = credentials_from_yaml(&cfg.credentials);
+    let loaded = load_provider(config_path)?;
+    let common = loaded.common();
+
+    println!("\n── Provider settings ────────────────────────────────────────────────────");
+    loaded.describe();
 
     println!("\n── Instances to destroy ─────────────────────────────────────────────────");
-    println!("  Project:         {}", creds.project_id);
-    println!("  Zone:            {}", creds.zone);
-    println!("  Service account: {}", creds.client_email);
-    println!();
 
-    let mut all_nodes: Vec<(&str, &str)> = Vec::new(); // (group_name, instance_name)
-    for group in &cfg.group {
+    let mut all_nodes: Vec<(&str, &str)> = Vec::new();
+    for group in &common.groups {
         for node in &group.node {
             println!("  {}  →  {}", group.name, node);
             all_nodes.push((&group.name, node));
@@ -471,7 +453,7 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let provider = GcpProvider::new(&creds)?;
+    let provider = loaded.provider();
 
     for (group_name, node) in &all_nodes {
         println!("\n  ── Deleting [{group_name}] {node} ──");
@@ -481,13 +463,7 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\n✓ Deletion requests submitted. GCP operations may take a minute to complete.");
-    println!("  Track progress:");
-    println!(
-        "    gcloud compute operations list --filter=\"zone:{}\" --project={}",
-        creds.zone, creds.project_id
-    );
-
+    println!("\n✓ Deletion requests submitted. Operations may take a minute to complete.");
     Ok(())
 }
 
@@ -565,14 +541,15 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Play ===\n");
     println!("Reading config: {config_path}");
 
-    let root = load_yaml(config_path)?;
-    let cfg = &root.gcp;
-    let creds = credentials_from_yaml(&cfg.credentials);
+    let loaded = load_provider(config_path)?;
+    let common = loaded.common();
+    let provider = loaded.provider();
 
     let ssh_user = env::var("MAGLEV_SSH_USER").unwrap_or_else(|_| "ubuntu".to_string());
 
-    // Find the ssh public-key path from the "default" generics config.
-    let ssh_pub_path = cfg
+    // Derive the SSH private key path from the generics "default" entry
+    // by stripping the ".pub" suffix from the public key path.
+    let ssh_pub_path = common
         .generics
         .iter()
         .find(|g| g.name == "default")
@@ -582,24 +559,25 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
-    let provider = GcpProvider::new(&creds)?;
+    println!("\n── Provider settings ────────────────────────────────────────────────────");
+    loaded.describe();
 
-    println!("\n  Fetching IPs from Compute Engine API …");
+    println!("\n  Fetching IPs …");
 
-    // Identify control-plane and worker groups from rules.
-    let cp_nodes: Vec<&str> = cfg
+    // Collect nodes for control-plane and worker groups from rules.
+    let cp_nodes: Vec<&str> = common
         .rules
         .iter()
         .find(|r| r.group == "control-plane")
-        .and_then(|r| cfg.group.iter().find(|g| g.name == r.group))
+        .and_then(|r| common.groups.iter().find(|g| g.name == r.group))
         .map(|g| g.node.iter().map(String::as_str).collect())
         .unwrap_or_default();
 
-    let worker_nodes: Vec<&str> = cfg
+    let worker_nodes: Vec<&str> = common
         .rules
         .iter()
         .find(|r| r.group == "worker")
-        .and_then(|r| cfg.group.iter().find(|g| g.name == r.group))
+        .and_then(|r| common.groups.iter().find(|g| g.name == r.group))
         .map(|g| g.node.iter().map(String::as_str).collect())
         .unwrap_or_default();
 
@@ -610,7 +588,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|&name| {
                     let ip = provider.get_vm_ip(name)?;
                     println!("  {name:<30} →  {ip}");
-                    Ok((name.to_string(), ip)) // owned String, no lifetime problem
+                    Ok((name.to_string(), ip))
                 })
                 .collect()
         };
