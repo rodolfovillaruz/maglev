@@ -331,21 +331,9 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
 // Spec validation
 // ---------------------------------------------------------------------------
 
-/// Walk every `SpecConfigYaml` block and reject any `ip-address` value that
-/// is not `"public"` or `"private"`.
-///
-/// Serde already rejects unknown enum variants, so by the time this function
-/// is called the only possible values are the two valid ones.  The function
-/// serves as an explicit audit point and prints a clear summary of what was
-/// found.
 fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Error>> {
     for spec_yaml in specs {
         for (i, cfg) in spec_yaml.config.iter().enumerate() {
-            // IpAddressType only has Public/Private variants; serde rejects
-            // anything else at deserialization time, so this match is
-            // exhaustive and always succeeds.  We keep it explicit so that
-            // adding a third variant in the future forces a conscious update
-            // here.
             match cfg.ip_address {
                 IpAddressType::Public | IpAddressType::Private => {}
             }
@@ -697,6 +685,102 @@ fn ssh_run_jump(
 }
 
 // ---------------------------------------------------------------------------
+// Control-plane provisioning steps
+//
+// Mirrors the three actions that `cisak install --control-plane` used to
+// perform, now run as individual SSH commands so maglev owns the logic
+// directly and no longer depends on the deprecated cisak subcommand.
+//
+//  1. sudo kubeadm init  [--control-plane-endpoint <ep> --upload-certs]
+//  2. cilium --kubeconfig /etc/kubernetes/admin.conf install
+//  3. cilium --kubeconfig /etc/kubernetes/admin.conf status --wait
+// ---------------------------------------------------------------------------
+
+const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
+
+/// Run the three control-plane bootstrap steps on `cp_ip` via SSH.
+///
+/// Each step is shown to the operator before execution and can be skipped
+/// individually.  If the operator skips `kubeadm init` the function returns
+/// immediately — there is nothing useful to do without an initialised cluster.
+fn provision_control_plane_node(
+    cp_ip: &str,
+    cp_name: &str,
+    ssh_user: &str,
+    ssh_priv_path: &str,
+    cp_endpoint: &str,
+    is_ha: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // ── Step A: kubeadm init ──────────────────────────────────────────────────
+    //
+    // For HA clusters (≥ 3 control-plane nodes) we pass:
+    //   --control-plane-endpoint  so all nodes share a stable API address
+    //   --upload-certs            so joining CP nodes can pull certificates
+    //                             automatically instead of requiring manual
+    //                             distribution
+    let kubeadm_init_cmd = if is_ha {
+        format!(
+            "sudo kubeadm init \
+             --control-plane-endpoint {cp_endpoint} \
+             --upload-certs"
+        )
+    } else {
+        "sudo kubeadm init".to_string()
+    };
+
+    println!("\n  → Step A: initialise the cluster with kubeadm");
+    println!("    $ {kubeadm_init_cmd}");
+
+    if !prompt_yes_no("  Run kubeadm init?") {
+        println!("  Skipped — aborting control-plane provisioning for {cp_name}.");
+        return Ok(());
+    }
+
+    println!("\n  Running kubeadm init — this may take several minutes …\n");
+    ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
+    println!("\n  ✓ kubeadm init complete.");
+
+    // ── Step B: cilium install ────────────────────────────────────────────────
+    //
+    // The Cilium CLI binary is already on the node (installed by cisak install
+    // -y via the startup script).  We pass --kubeconfig explicitly so the
+    // command works even before ~/.kube/config is set up for the SSH user.
+    let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
+
+    println!("\n  → Step B: deploy Cilium CNI");
+    println!("    $ {cilium_install_cmd}");
+
+    if !prompt_yes_no("  Run cilium install?") {
+        println!("  Skipped — Cilium CNI will not be deployed.");
+        return Ok(());
+    }
+
+    ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd)?;
+    println!("\n  ✓ Cilium CNI installed.");
+
+    // ── Step C: cilium status --wait ──────────────────────────────────────────
+    //
+    // Blocks until all Cilium components report healthy.  This ensures the
+    // cluster's networking layer is fully operational before maglev attempts
+    // to join worker (or additional control-plane) nodes.
+    let cilium_status_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait");
+
+    println!("\n  → Step C: wait for Cilium to become ready");
+    println!("    $ {cilium_status_cmd}");
+
+    if !prompt_yes_no("  Run cilium status --wait?") {
+        println!("  Skipped — continuing without confirming Cilium health.");
+        return Ok(());
+    }
+
+    ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd)?;
+    println!("\n  ✓ Cilium is ready.");
+
+    println!("\n  ✓ {cp_name} control-plane provisioning complete.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // `play` subcommand
 // ---------------------------------------------------------------------------
 
@@ -833,13 +917,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("No control-plane nodes available")?;
 
     // ── Determine the stable control-plane endpoint ───────────────────────────
-    //
-    // Priority:
-    //   1. Explicit `control-plane-endpoint` in the generics config block.
-    //   2. The primary control-plane node's resolved IP (fallback, single-node
-    //      or bare-metal HA without an external LB).
-    //
-    // The value is normalised to `<host>:<port>` form.
     let cp_endpoint: String = match &default_generic.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
             let ep = ep.trim().to_string();
@@ -865,7 +942,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // ── Step 1 / 3 — Primary control-plane (kubeadm init) ────────────────────
+    // ── Step 1 / 3 — Primary control-plane ───────────────────────────────────
     println!("\n━━ Step 1 / 3 — Primary control-plane init ({primary_cp_name}) ━━━━━━━━━━━━");
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
 
@@ -878,19 +955,8 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         if already_init.trim() == "yes" {
-            println!("  ✓ {primary_cp_name} already initialised — skipping kubeadm init.");
+            println!("  ✓ {primary_cp_name} already initialised — skipping.");
 
-            // ── IMPORTANT: verify the stored controlPlaneEndpoint ─────────────
-            //
-            // If the node was initialised by the startup script (cisak install
-            // -y) rather than by maglev, the kubeadm-config ConfigMap will lack
-            // a stable controlPlaneEndpoint.  Attempting to join additional
-            // control-plane nodes against such a cluster always fails with:
-            //
-            //   "unable to add a new control plane instance to a cluster that
-            //    doesn't have a stable controlPlaneEndpoint address"
-            //
-            // Detect this early and bail with clear remediation steps.
             if is_ha {
                 verify_control_plane_endpoint(
                     primary_cp_ip,
@@ -901,23 +967,14 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
             }
         } else {
-            let init_cmd = if is_ha {
-                format!(
-                    "sudo cisak install --control-plane \
-                     --control-plane-endpoint {cp_endpoint} \
-                     --upload-certs -y"
-                )
-            } else {
-                "sudo cisak install --control-plane -y".to_string()
-            };
-
-            if prompt_yes_no(&format!("  Run: {init_cmd} ?")) {
-                println!("\n  Initialising — this may take several minutes …\n");
-                ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, &init_cmd)?;
-                println!("\n  ✓ {primary_cp_name} initialised.");
-            } else {
-                println!("  Skipped.");
-            }
+            provision_control_plane_node(
+                primary_cp_ip,
+                primary_cp_name,
+                ssh_user,
+                &ssh_priv_path,
+                &cp_endpoint,
+                is_ha,
+            )?;
         }
     } else {
         println!("  Skipped.");
@@ -1115,12 +1172,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Control-plane endpoint guard
 // ---------------------------------------------------------------------------
 
-/// Read the `controlPlaneEndpoint` field from the live `kubeadm-config`
-/// ConfigMap on `cp_ip` and compare it against the value maglev would use.
-///
-/// Exits with a descriptive error when the cluster was initialised without
-/// `--control-plane-endpoint` (the most common cause of the
-/// "doesn't have a stable controlPlaneEndpoint address" join failure).
 fn verify_control_plane_endpoint(
     cp_ip: &str,
     cp_name: &str,
@@ -1130,7 +1181,6 @@ fn verify_control_plane_endpoint(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Verifying controlPlaneEndpoint in kubeadm-config …");
 
-    // Extract just the controlPlaneEndpoint line from the stored YAML blob.
     let script = "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf \
         get configmap kubeadm-config -n kube-system \
         -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
@@ -1145,15 +1195,10 @@ fn verify_control_plane_endpoint(
         .unwrap_or_default();
 
     if stored_endpoint.is_empty() {
-        // The cluster was almost certainly initialised by the startup script
-        // with a plain `kubeadm init` / `cisak install -y` that did not include
-        // --control-plane-endpoint.  Joining a second CP node into this cluster
-        // will always fail.
         return Err(format!(
             "Cluster on {cp_name} has no controlPlaneEndpoint stored in kubeadm-config.\n\
              \n\
-             This happens when the node was initialised by the startup script \
-             (cisak install -y) without --control-plane-endpoint.\n\
+             This happens when the node was initialised without --control-plane-endpoint.\n\
              \n\
              Remediation — on every control-plane and worker node run:\n\
              \n\
@@ -1162,8 +1207,8 @@ fn verify_control_plane_endpoint(
              \n\
              Then re-run 'maglev play'.  Maglev will call:\n\
              \n\
-             \tcisak install --control-plane \
-             --control-plane-endpoint {expected_endpoint} --upload-certs -y\n\
+             \tsudo kubeadm init \
+             --control-plane-endpoint {expected_endpoint} --upload-certs\n\
              \n\
              To use a dedicated load-balancer address instead of the primary \
              node's IP, add to the generics block in your config:\n\
@@ -1175,8 +1220,6 @@ fn verify_control_plane_endpoint(
 
     println!("  ✓ controlPlaneEndpoint: {stored_endpoint}");
 
-    // Warn (don't abort) when the stored endpoint differs from what maglev
-    // would use — the user may have changed the config after init.
     let stored_normalised = if stored_endpoint.contains(':') {
         stored_endpoint.clone()
     } else {
