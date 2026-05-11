@@ -20,7 +20,7 @@ digitalocean:
         set -e
 
         apt-get update
-        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/cisak-v0.1.11-linux-amd64.tar.gz | tar -xz
+        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.12/cisak-v0.1.11-linux-amd64.tar.gz | tar -xz
         install -m 755 -o root -g root cisak /usr/local/bin/cisak
         cisak generate
         cisak install -y
