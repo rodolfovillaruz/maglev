@@ -947,6 +947,16 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
 
     if prompt_yes_no(&format!("  SSH-check and provision {primary_cp_name}?")) {
+        // ── NEW: verify DNS before anything touches kubeadm ──────────────────
+        ensure_cp_endpoint_resolves(
+            primary_cp_name,
+            &cp_endpoint,
+            primary_cp_ip, // temporary stand-in for the real LB
+            |cmd| ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
+            |cmd| ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
+        )?;
+        // ─────────────────────────────────────────────────────────────────────
+
         let already_init = ssh_capture(
             primary_cp_ip,
             ssh_user,
@@ -1019,6 +1029,16 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
+            // ── NEW ──────────────────────────────────────────────────────────
+            ensure_cp_endpoint_resolves(
+                name,
+                &cp_endpoint,
+                primary_cp_ip,
+                |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+                |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+            )?;
+            // ─────────────────────────────────────────────────────────────────
+
             let already_joined = ssh_capture(
                 ip,
                 ssh_user,
@@ -1087,6 +1107,26 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             println!("  Skipped.");
             continue;
         }
+
+        // ── NEW: DNS guard — direct or via jump depending on topology ────────
+        if use_jump_for_workers {
+            ensure_cp_endpoint_resolves(
+                name,
+                &cp_endpoint,
+                primary_cp_ip,
+                |cmd| ssh_capture_jump(primary_cp_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                |cmd| ssh_run_jump(primary_cp_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+            )?;
+        } else {
+            ensure_cp_endpoint_resolves(
+                name,
+                &cp_endpoint,
+                primary_cp_ip,
+                |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+                |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+            )?;
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         if worker_join_cmd.is_empty() {
             eprintln!("  ✗ No join command available — skipping {name}.");
@@ -1233,6 +1273,98 @@ fn verify_control_plane_endpoint(
              The join command will target the stored endpoint — this is \
              correct behaviour. Update your config if needed."
         );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Control-plane-endpoint DNS guard
+// ---------------------------------------------------------------------------
+
+/// Verify that the hostname inside `cp_endpoint` resolves on a remote node.
+///
+/// * Skipped when `cp_endpoint` is already a bare IP address.
+/// * When the hostname is **unresolvable** the user is offered two choices:
+///   - Let maglev append a temporary `/etc/hosts` line right now.
+///   - Abort, with exact copy-paste instructions for a manual fix.
+///
+/// `capture` / `run` are thin closures over either the direct or the
+/// ProxyJump SSH helpers so the same logic works for every node type.
+fn ensure_cp_endpoint_resolves(
+    node_name: &str,
+    cp_endpoint: &str,
+    fallback_ip: &str,
+    capture: impl Fn(&str) -> Result<String, Box<dyn std::error::Error>>,
+    run: impl Fn(&str) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host = cp_endpoint.split(':').next().unwrap_or(cp_endpoint);
+
+    // Nothing to do when the endpoint is already an IP address.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    println!("  Checking if '{host}' resolves on {node_name} …");
+
+    let result = capture(&format!(
+        "getent hosts {host} >/dev/null 2>&1 && echo ok || echo fail"
+    ))?;
+
+    if result.trim() == "ok" {
+        println!("  ✓ '{host}' resolves.");
+        return Ok(());
+    }
+
+    eprintln!(
+        "\n  ⚠  '{host}' does NOT resolve on {node_name}.\n\
+         \n\
+         kubeadm will fail unless the name is resolvable before it starts.\n\
+         \n\
+         Long-term fix: provision a load-balancer, point DNS '{host}' at it,\n\
+         then remove the /etc/hosts workaround from every node.\n\
+         \n\
+         Short-term: maglev can add  {fallback_ip}  {host}\n\
+         to /etc/hosts on this node right now (idempotent — skipped if already present)."
+    );
+
+    if prompt_yes_no(&format!(
+        "  Add '{fallback_ip}  {host}' to /etc/hosts on {node_name}?"
+    )) {
+        // grep guards against duplicate lines on re-runs.
+        run(&format!(
+            "grep -qF '{host}' /etc/hosts \
+             || echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
+        ))?;
+        println!(
+            "  ✓ Added '{fallback_ip}  {host}' to /etc/hosts on {node_name}.\n\
+             \n\
+             ℹ  This is a temporary placeholder pointing at the primary control-plane IP.\n\
+             ℹ  Once your load-balancer is live, run on EVERY node:\n\
+             \n\
+             \t  sudo sed -i '/{host}/d' /etc/hosts\n\
+             \n\
+             ℹ  Then ensure DNS resolves '{host}' to the LB address."
+        );
+    } else {
+        return Err(format!(
+            "DNS resolution for '{host}' is required before kubeadm can run.\n\
+             \n\
+             Add the following line to /etc/hosts on EVERY cluster node\n\
+             (all control-plane + worker nodes) before re-running 'maglev play':\n\
+             \n\
+             \t{fallback_ip}  {host}\n\
+             \n\
+             Example (run on each node):\n\
+             \n\
+             \techo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts\n\
+             \n\
+             Once a real load-balancer is provisioned, update the entry to point\n\
+             to the LB address, or delete it and let DNS handle resolution:\n\
+             \n\
+             \tsudo sed -i '/{host}/d' /etc/hosts"
+        )
+        .into());
     }
 
     Ok(())
