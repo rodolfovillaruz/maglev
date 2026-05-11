@@ -67,6 +67,11 @@ impl GcpProvider {
 }
 
 impl Provider for GcpProvider {
+    /// Create a GCE instance.
+    ///
+    /// When `assign_public_ip` is `true` an ephemeral external IP is attached
+    /// via an `accessConfigs` entry on the first network interface.  When
+    /// `false` the instance is created with an internal IP only.
     fn create_vm(
         &self,
         instance_name: &str,
@@ -75,6 +80,7 @@ impl Provider for GcpProvider {
         boot_disk_size_gb: u64,
         ssh_keys_metadata: &str,
         startup_script: &str,
+        assign_public_ip: bool,
     ) -> Result<Value, Box<dyn std::error::Error>> {
         let url = format!(
             "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances",
@@ -97,6 +103,24 @@ impl Provider for GcpProvider {
             }));
         }
 
+        // Build the network interface.  An `accessConfigs` block with type
+        // ONE_TO_ONE_NAT gives the instance an ephemeral external IP; omitting
+        // it means internal-only.
+        let network_interface = if assign_public_ip {
+            serde_json::json!({
+                "network": "global/networks/default",
+                "accessConfigs": [{
+                    "type": "ONE_TO_ONE_NAT",
+                    "name": "External NAT",
+                    "networkTier": "PREMIUM"
+                }]
+            })
+        } else {
+            serde_json::json!({
+                "network": "global/networks/default"
+            })
+        };
+
         let zone = &self.zone;
         let request_body = serde_json::json!({
             "name": instance_name,
@@ -109,9 +133,7 @@ impl Provider for GcpProvider {
                     "diskSizeGb":  boot_disk_size_gb.to_string(),
                 }
             }],
-            "networkInterfaces": [{
-                "network": "global/networks/default"
-            }],
+            "networkInterfaces": [network_interface],
             "metadata": { "items": metadata_items }
         });
 
@@ -154,7 +176,17 @@ impl Provider for GcpProvider {
         Ok(body)
     }
 
-    fn get_vm_ip(&self, instance_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    /// Return the IP address of a GCE instance.
+    ///
+    /// `prefer_public = true`  → `networkInterfaces[0].accessConfigs[0].natIP`
+    ///                           (the external ephemeral IP, if one was assigned)
+    /// `prefer_public = false` → `networkInterfaces[0].networkIP`
+    ///                           (the internal VPC IP)
+    fn get_vm_ip(
+        &self,
+        instance_name: &str,
+        prefer_public: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!(
             "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}",
             self.project_id, self.zone, instance_name
@@ -176,10 +208,29 @@ impl Provider for GcpProvider {
             .into());
         }
 
-        body["networkInterfaces"][0]["networkIP"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("No internal IP found for instance '{instance_name}'").into())
+        let iface = &body["networkInterfaces"][0];
+
+        if prefer_public {
+            // natIP is only present when an accessConfig of type ONE_TO_ONE_NAT
+            // was attached at creation time.
+            iface["accessConfigs"][0]["natIP"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "No external (public) IP found for instance '{instance_name}'. \
+                         Was it created with ip-address: public?"
+                    )
+                    .into()
+                })
+        } else {
+            iface["networkIP"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    format!("No internal IP found for instance '{instance_name}'").into()
+                })
+        }
     }
 }
 

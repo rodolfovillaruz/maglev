@@ -160,6 +160,11 @@ impl DigitalOceanProvider {
 // ---------------------------------------------------------------------------
 
 impl Provider for DigitalOceanProvider {
+    /// Create a DigitalOcean Droplet.
+    ///
+    /// `assign_public_ip` — DigitalOcean Droplets always receive a public IP,
+    /// so this parameter is accepted for interface parity but has no effect on
+    /// the API call.
     fn create_vm(
         &self,
         instance_name: &str,
@@ -168,7 +173,11 @@ impl Provider for DigitalOceanProvider {
         boot_disk_size_gb: u64,
         ssh_keys_metadata: &str,
         startup_script: &str,
+        assign_public_ip: bool,
     ) -> Result<Value, Box<dyn std::error::Error>> {
+        // DigitalOcean Droplets always have a public IP; nothing extra to do.
+        let _ = assign_public_ip;
+
         // Strip the optional "username:" prefix (written by the GCP path).
         let public_key = match ssh_keys_metadata.find(':') {
             Some(idx) => ssh_keys_metadata[idx + 1..].trim(),
@@ -239,8 +248,17 @@ impl Provider for DigitalOceanProvider {
         Err(format!("DigitalOcean API returned HTTP {status}: {body}").into())
     }
 
-    /// Fetch the IP of a droplet (private preferred, falls back to public).
-    fn get_vm_ip(&self, instance_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    /// Return the IP address of a Droplet.
+    ///
+    /// `prefer_public = true`  → public IP (type `"public"`) is returned
+    ///                           first; falls back to private if absent.
+    /// `prefer_public = false` → private IP (type `"private"`) is preferred;
+    ///                           falls back to public if no private exists.
+    fn get_vm_ip(
+        &self,
+        instance_name: &str,
+        prefer_public: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!(
             "https://api.digitalocean.com/v2/droplets?name={}",
             instance_name
@@ -271,10 +289,16 @@ impl Provider for DigitalOceanProvider {
             .as_array()
             .ok_or_else(|| format!("No v4 networks on droplet '{instance_name}'"))?;
 
+        let (primary, fallback) = if prefer_public {
+            ("public", "private")
+        } else {
+            ("private", "public")
+        };
+
         networks
             .iter()
-            .find(|n| n["type"] == "private")
-            .or_else(|| networks.iter().find(|n| n["type"] == "public"))
+            .find(|n| n["type"] == primary)
+            .or_else(|| networks.iter().find(|n| n["type"] == fallback))
             .and_then(|n| n["ip_address"].as_str())
             .map(str::to_string)
             .ok_or_else(|| format!("No IP address found for droplet '{instance_name}'").into())

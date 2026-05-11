@@ -32,6 +32,7 @@ gcp:
     - machine-type: e2-standard-2
       boot-disk-image: ubuntu-2404-lts-amd64
       boot-disk-size: 20
+      ip-address: public
   - name: worker
     config:
     - machine-type: e2-standard-2

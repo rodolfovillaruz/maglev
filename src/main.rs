@@ -54,6 +54,36 @@ enum Commands {
 }
 
 // ---------------------------------------------------------------------------
+// ip-address field type
+// ---------------------------------------------------------------------------
+
+/// Validated value for `ip-address` in a spec config block.
+///
+/// Accepted YAML values: `"public"` or `"private"`.
+/// Omitting the field is equivalent to `"private"`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+enum IpAddressType {
+    Public,
+    Private,
+}
+
+impl Default for IpAddressType {
+    fn default() -> Self {
+        IpAddressType::Private
+    }
+}
+
+impl std::fmt::Display for IpAddressType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IpAddressType::Public => write!(f, "public"),
+            IpAddressType::Private => write!(f, "private"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared YAML types (identical structure across providers)
 // ---------------------------------------------------------------------------
 
@@ -74,7 +104,6 @@ struct GenericConfigYaml {
     #[serde(rename = "ssh-public-key")]
     ssh_public_key: String,
     script: String,
-    // Added: matches the new `user` field in both provider YAML files.
     user: String,
 }
 
@@ -92,6 +121,10 @@ struct SpecConfigYaml {
     boot_disk_image: String,
     #[serde(rename = "boot-disk-size")]
     boot_disk_size: u64,
+    /// Controls whether a public IP is assigned/used.
+    /// Accepts `"public"` or `"private"` only; defaults to `"private"`.
+    #[serde(rename = "ip-address", default)]
+    ip_address: IpAddressType,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -227,6 +260,8 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
             .map_err(|e| format!("GCP YAML parse error in '{path}': {e}"))?;
         let yaml = root.gcp;
 
+        validate_specs(&yaml.specs)?;
+
         let creds = GcpCredentials {
             client_email: yaml.credentials.client_email.clone(),
             private_key_path: expand_tilde(&yaml.credentials.private_key),
@@ -254,6 +289,8 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
             .map_err(|e| format!("DigitalOcean YAML parse error in '{path}': {e}"))?;
         let yaml = root.digitalocean;
 
+        validate_specs(&yaml.specs)?;
+
         let creds = DigitalOceanCredentials {
             token: yaml.credentials.token.clone(),
             region: yaml.credentials.region.clone(),
@@ -279,6 +316,38 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
         )
         .into())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spec validation
+// ---------------------------------------------------------------------------
+
+/// Walk every `SpecConfigYaml` block and reject any `ip-address` value that
+/// is not `"public"` or `"private"`.
+///
+/// Serde already rejects unknown enum variants, so by the time this function
+/// is called the only possible values are the two valid ones.  The function
+/// serves as an explicit audit point and prints a clear summary of what was
+/// found.
+fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Error>> {
+    for spec_yaml in specs {
+        for (i, cfg) in spec_yaml.config.iter().enumerate() {
+            // IpAddressType only has Public/Private variants; serde rejects
+            // anything else at deserialization time, so this match is
+            // exhaustive and always succeeds.  We keep it explicit so that
+            // adding a third variant in the future forces a conscious update
+            // here.
+            match cfg.ip_address {
+                IpAddressType::Public | IpAddressType::Private => {}
+            }
+
+            println!(
+                "  spec '{}' [{}]: ip-address = {}",
+                spec_yaml.name, i, cfg.ip_address
+            );
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -364,10 +433,9 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             r.group_name, r.generics_name, r.specs_name
         );
         println!(
-            "    machine-type: {}  image: {}  disk: {} GB",
-            r.spec.machine_type, r.spec.boot_disk_image, r.spec.boot_disk_size
+            "    machine-type: {}  image: {}  disk: {} GB  ip-address: {}",
+            r.spec.machine_type, r.spec.boot_disk_image, r.spec.boot_disk_size, r.spec.ip_address
         );
-        // Show both the user and the key path in the summary.
         println!(
             "    user: {}  ssh-public-key: {}",
             r.generic.user, r.generic.ssh_public_key
@@ -391,14 +459,14 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             r.group_name
         );
 
-        // Use the `user` field from the generic config instead of the
-        // previously hard-coded "ubuntu" prefix.
         let ssh_meta = read_ssh_public_key(&r.generic.ssh_public_key)
             .map(|k| format!("{}:{k}", r.generic.user))
             .unwrap_or_else(|e| {
                 eprintln!("  ⚠ Could not read SSH public key: {e}");
                 String::new()
             });
+
+        let assign_public_ip = r.spec.ip_address == IpAddressType::Public;
 
         for node in r.nodes {
             println!("\n  ── Creating instance: {node} ──");
@@ -409,6 +477,7 @@ fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 r.spec.boot_disk_size,
                 &ssh_meta,
                 &r.generic.script,
+                assign_public_ip,
             )?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
@@ -544,8 +613,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let common = loaded.common();
     let provider = loaded.provider();
 
-    // Resolve the "default" generic config entry once; every field we need
-    // lives there (ssh-public-key and the new `user` field).
     let default_generic = common
         .generics
         .iter()
@@ -553,17 +620,53 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|g| g.config.first())
         .ok_or("No 'default' generics entry found in config")?;
 
-    // `user` now comes from the YAML rather than an environment variable.
     let ssh_user = &default_generic.user;
 
-    // Derive the private key path by stripping the ".pub" suffix.
     let ssh_pub_path = default_generic.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
     println!("\n── Provider settings ────────────────────────────────────────────────────");
     loaded.describe();
 
+    // ── Build a map from group name → prefer_public ──────────────────────────
+    //
+    // For each rule, look up the spec it references and read the ip-address
+    // field.  This drives both the IP-lookup call and the SSH target address.
+    let group_prefer_public: HashMap<&str, bool> = common
+        .rules
+        .iter()
+        .filter_map(|rule| {
+            let ip_type = common
+                .specs
+                .iter()
+                .find(|s| s.name == rule.specs)
+                .and_then(|s| s.config.first())
+                .map(|c| c.ip_address)
+                .unwrap_or(IpAddressType::Private);
+            Some((rule.group.as_str(), ip_type == IpAddressType::Public))
+        })
+        .collect();
+
+    let cp_prefer_public = *group_prefer_public.get("control-plane").unwrap_or(&false);
+    let worker_prefer_public = *group_prefer_public.get("worker").unwrap_or(&false);
+
     println!("\n  Fetching IPs …");
+    println!(
+        "  control-plane ip-address: {}",
+        if cp_prefer_public {
+            "public"
+        } else {
+            "private"
+        }
+    );
+    println!(
+        "  worker        ip-address: {}",
+        if worker_prefer_public {
+            "public"
+        } else {
+            "private"
+        }
+    );
 
     let cp_nodes: Vec<&str> = common
         .rules
@@ -581,20 +684,27 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .map(|g| g.node.iter().map(String::as_str).collect())
         .unwrap_or_default();
 
-    let resolve_ips =
-        |nodes: &[&str]| -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-            nodes
-                .iter()
-                .map(|&name| {
-                    let ip = provider.get_vm_ip(name)?;
-                    println!("  {name:<30} →  {ip}");
-                    Ok((name.to_string(), ip))
-                })
-                .collect()
-        };
+    // Resolve IPs using the preference dictated by ip-address in each group's
+    // spec.  When prefer_public is true the provider returns the external IP;
+    // when false it returns the internal/private IP.
+    let resolve_ips = |nodes: &[&str],
+                       prefer_public: bool|
+     -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        nodes
+            .iter()
+            .map(|&name| {
+                let ip = provider.get_vm_ip(name, prefer_public)?;
+                println!(
+                    "  {name:<30} →  {ip}  ({})",
+                    if prefer_public { "public" } else { "private" }
+                );
+                Ok((name.to_string(), ip))
+            })
+            .collect()
+    };
 
-    let cp_with_ips: Vec<(String, String)> = resolve_ips(&cp_nodes)?;
-    let worker_with_ips: Vec<(String, String)> = resolve_ips(&worker_nodes)?;
+    let cp_with_ips: Vec<(String, String)> = resolve_ips(&cp_nodes, cp_prefer_public)?;
+    let worker_with_ips: Vec<(String, String)> = resolve_ips(&worker_nodes, worker_prefer_public)?;
 
     println!("  SSH user: {ssh_user}  private key: {ssh_priv_path}");
 

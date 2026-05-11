@@ -32,6 +32,7 @@ digitalocean:
     - machine-type: s-2vcpu-4gb
       boot-disk-image: ubuntu-24-04-x64
       boot-disk-size: 20
+      ip-address: public
   - name: worker
     config:
     - machine-type: s-2vcpu-4gb
