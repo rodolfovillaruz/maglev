@@ -105,6 +105,15 @@ struct GenericConfigYaml {
     ssh_public_key: String,
     script: String,
     user: String,
+    /// Optional stable address for the Kubernetes API server load-balancer.
+    /// When omitted, the primary control-plane node's resolved IP is used.
+    /// Format: `<host>` or `<host>:<port>` (port defaults to 6443).
+    #[serde(
+        rename = "control-plane-endpoint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    control_plane_endpoint: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -749,7 +758,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .map(|g| g.node.iter().map(String::as_str).collect())
         .unwrap_or_default();
 
-    // ── Control-plane count diagnostics ──────────────────────────────────────
     let cp_count = cp_nodes.len();
 
     if cp_count == 0 {
@@ -771,13 +779,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let is_ha = cp_count >= 3;
 
-    // ── Connectivity strategy ─────────────────────────────────────────────────
-    //
-    // If workers only have private IPs but control-plane nodes have public IPs
-    // we cannot reach the workers directly from the operator's machine.
-    // Use the first control-plane node as a ProxyJump host instead.
     let use_jump_for_workers = !worker_prefer_public && cp_prefer_public;
-
     if use_jump_for_workers {
         println!(
             "\n  ℹ  Workers have private IPs and control-plane has public IPs. \
@@ -830,6 +832,39 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .first()
         .ok_or("No control-plane nodes available")?;
 
+    // ── Determine the stable control-plane endpoint ───────────────────────────
+    //
+    // Priority:
+    //   1. Explicit `control-plane-endpoint` in the generics config block.
+    //   2. The primary control-plane node's resolved IP (fallback, single-node
+    //      or bare-metal HA without an external LB).
+    //
+    // The value is normalised to `<host>:<port>` form.
+    let cp_endpoint: String = match &default_generic.control_plane_endpoint {
+        Some(ep) if !ep.trim().is_empty() => {
+            let ep = ep.trim().to_string();
+            if ep.contains(':') {
+                ep
+            } else {
+                format!("{ep}:6443")
+            }
+        }
+        _ => format!("{primary_cp_ip}:6443"),
+    };
+
+    println!("\n  control-plane-endpoint: {cp_endpoint}");
+
+    if is_ha && cp_endpoint.starts_with(primary_cp_ip.as_str()) {
+        eprintln!(
+            "\n  ⚠  WARNING: control-plane-endpoint is set to the primary node's own \
+             IP ({cp_endpoint}).\n\
+             This works but is not truly highly available — if that node is lost \
+             the API server becomes unreachable.\n\
+             Consider adding a load-balancer and setting 'control-plane-endpoint' \
+             in the generics block of your config."
+        );
+    }
+
     // ── Step 1 / 3 — Primary control-plane (kubeadm init) ────────────────────
     println!("\n━━ Step 1 / 3 — Primary control-plane init ({primary_cp_name}) ━━━━━━━━━━━━");
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
@@ -844,14 +879,32 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         if already_init.trim() == "yes" {
             println!("  ✓ {primary_cp_name} already initialised — skipping kubeadm init.");
+
+            // ── IMPORTANT: verify the stored controlPlaneEndpoint ─────────────
+            //
+            // If the node was initialised by the startup script (cisak install
+            // -y) rather than by maglev, the kubeadm-config ConfigMap will lack
+            // a stable controlPlaneEndpoint.  Attempting to join additional
+            // control-plane nodes against such a cluster always fails with:
+            //
+            //   "unable to add a new control plane instance to a cluster that
+            //    doesn't have a stable controlPlaneEndpoint address"
+            //
+            // Detect this early and bail with clear remediation steps.
+            if is_ha {
+                verify_control_plane_endpoint(
+                    primary_cp_ip,
+                    primary_cp_name,
+                    ssh_user,
+                    &ssh_priv_path,
+                    &cp_endpoint,
+                )?;
+            }
         } else {
-            // For HA (≥3 CP nodes) pass --control-plane-endpoint so that
-            // subsequent CP nodes can join.  For a single node, a plain init
-            // is sufficient.
             let init_cmd = if is_ha {
                 format!(
                     "sudo cisak install --control-plane \
-                     --control-plane-endpoint {primary_cp_ip}:6443 \
+                     --control-plane-endpoint {cp_endpoint} \
                      --upload-certs -y"
                 )
             } else {
@@ -877,14 +930,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             cp_with_ips.len() - 1
         );
 
-        // Build the control-plane join command once from the primary CP.
-        //
-        // We upload certs to get a fresh certificate-key, then ask kubeadm to
-        // print the full join command and append the --control-plane flag.
-        //
-        //   kubeadm certs certificate-key     → generates a new key
-        //   kubeadm init phase upload-certs   → re-uploads certs with that key
-        //   kubeadm token create --print-join-command → base join line
         let cp_join_script = "\
             CERT_KEY=$(sudo kubeadm certs certificate-key) && \
             sudo kubeadm init phase upload-certs \
@@ -961,7 +1006,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Fetch the worker join command from the primary control-plane.
     let worker_join_cmd = match ssh_capture(
         primary_cp_ip,
         ssh_user,
@@ -994,7 +1038,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         println!("  Join command: {worker_join_cmd}");
 
-        // Check if the worker already has kubelet running.
         let already_joined = if use_jump_for_workers {
             ssh_capture_jump(
                 primary_cp_ip,
@@ -1050,6 +1093,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -1065,4 +1109,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Play { config } => play_config(&config),
         Commands::Print => print_build_credential(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Control-plane endpoint guard
+// ---------------------------------------------------------------------------
+
+/// Read the `controlPlaneEndpoint` field from the live `kubeadm-config`
+/// ConfigMap on `cp_ip` and compare it against the value maglev would use.
+///
+/// Exits with a descriptive error when the cluster was initialised without
+/// `--control-plane-endpoint` (the most common cause of the
+/// "doesn't have a stable controlPlaneEndpoint address" join failure).
+fn verify_control_plane_endpoint(
+    cp_ip: &str,
+    cp_name: &str,
+    ssh_user: &str,
+    ssh_priv_path: &str,
+    expected_endpoint: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("  Verifying controlPlaneEndpoint in kubeadm-config …");
+
+    // Extract just the controlPlaneEndpoint line from the stored YAML blob.
+    let script = "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+        get configmap kubeadm-config -n kube-system \
+        -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
+        | grep 'controlPlaneEndpoint' || true";
+
+    let output = ssh_capture(cp_ip, ssh_user, ssh_priv_path, script).unwrap_or_default();
+
+    let stored_endpoint = output
+        .split(':')
+        .nth(1)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    if stored_endpoint.is_empty() {
+        // The cluster was almost certainly initialised by the startup script
+        // with a plain `kubeadm init` / `cisak install -y` that did not include
+        // --control-plane-endpoint.  Joining a second CP node into this cluster
+        // will always fail.
+        return Err(format!(
+            "Cluster on {cp_name} has no controlPlaneEndpoint stored in kubeadm-config.\n\
+             \n\
+             This happens when the node was initialised by the startup script \
+             (cisak install -y) without --control-plane-endpoint.\n\
+             \n\
+             Remediation — on every control-plane and worker node run:\n\
+             \n\
+             \tsudo kubeadm reset -f\n\
+             \tsudo rm -rf /etc/cni /etc/kubernetes /var/lib/etcd /var/lib/kubelet\n\
+             \n\
+             Then re-run 'maglev play'.  Maglev will call:\n\
+             \n\
+             \tcisak install --control-plane \
+             --control-plane-endpoint {expected_endpoint} --upload-certs -y\n\
+             \n\
+             To use a dedicated load-balancer address instead of the primary \
+             node's IP, add to the generics block in your config:\n\
+             \n\
+             \tcontrol-plane-endpoint: \"<lb-address-or-dns>\""
+        )
+        .into());
+    }
+
+    println!("  ✓ controlPlaneEndpoint: {stored_endpoint}");
+
+    // Warn (don't abort) when the stored endpoint differs from what maglev
+    // would use — the user may have changed the config after init.
+    let stored_normalised = if stored_endpoint.contains(':') {
+        stored_endpoint.clone()
+    } else {
+        format!("{stored_endpoint}:6443")
+    };
+
+    if stored_normalised != expected_endpoint {
+        eprintln!(
+            "  ⚠  controlPlaneEndpoint in kubeadm-config ({stored_normalised}) \
+             differs from the value in your config ({expected_endpoint}).\n\
+             The join command will target the stored endpoint — this is \
+             correct behaviour. Update your config if needed."
+        );
+    }
+
+    Ok(())
 }

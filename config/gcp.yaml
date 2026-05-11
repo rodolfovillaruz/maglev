@@ -26,6 +26,7 @@ gcp:
         cisak install -y
       ssh-public-key: ~/.ssh/id_ed25519.pub
       user: ubuntu
+      control-plane-endpoint: k8s-api.example.com
   specs:
   - name: control-plane
     config:
