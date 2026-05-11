@@ -1,0 +1,350 @@
+use crate::provider::Provider;
+use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Credential types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct DigitalOceanCredentials {
+    pub token: String,
+    pub region: String,
+}
+
+// ---------------------------------------------------------------------------
+// DigitalOceanProvider — implements Provider
+// ---------------------------------------------------------------------------
+
+pub struct DigitalOceanProvider {
+    token: String,
+    region: String,
+}
+
+impl DigitalOceanProvider {
+    pub fn new(creds: &DigitalOceanCredentials) -> Result<Self, Box<dyn std::error::Error>> {
+        println!("  Validating DigitalOcean API token …");
+
+        let agent = build_agent();
+        let mut resp = agent
+            .get("https://api.digitalocean.com/v2/account")
+            .header("Authorization", &format!("Bearer {}", creds.token))
+            .call()?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(
+                format!("DigitalOcean authentication failed (HTTP {status}): {body}").into(),
+            );
+        }
+
+        let email = body["account"]["email"].as_str().unwrap_or("unknown");
+        println!("  Authenticated as: {email}");
+
+        Ok(Self {
+            token: creds.token.clone(),
+            region: creds.region.clone(),
+        })
+    }
+
+    /// Fetch the IP of a droplet (private preferred, falls back to public).
+    pub fn get_vm_ip(&self, instance_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://api.digitalocean.com/v2/droplets?name={}",
+            instance_name
+        );
+
+        let agent = build_agent();
+        let mut resp = agent
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "DigitalOcean API returned HTTP {status} while fetching '{instance_name}': {body}"
+            )
+            .into());
+        }
+
+        let droplet = body["droplets"]
+            .as_array()
+            .and_then(|a| a.first())
+            .ok_or_else(|| format!("No droplet found with name '{instance_name}'"))?;
+
+        let networks = droplet["networks"]["v4"]
+            .as_array()
+            .ok_or_else(|| format!("No v4 networks on droplet '{instance_name}'"))?;
+
+        // Prefer the private address so nodes can reach each other without
+        // leaving the datacenter; fall back to the public address.
+        networks
+            .iter()
+            .find(|n| n["type"] == "private")
+            .or_else(|| networks.iter().find(|n| n["type"] == "public"))
+            .and_then(|n| n["ip_address"].as_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("No IP address found for droplet '{instance_name}'").into())
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    /// Look up a droplet by name and return its numeric ID.
+    fn get_droplet_id(&self, name: &str) -> Result<u64, Box<dyn std::error::Error>> {
+        let url = format!("https://api.digitalocean.com/v2/droplets?name={}", name);
+
+        let agent = build_agent();
+        let mut resp = agent
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "DigitalOcean API returned HTTP {status} while looking up '{name}': {body}"
+            )
+            .into());
+        }
+
+        body["droplets"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|d| d["id"].as_u64())
+            .ok_or_else(|| format!("No droplet found with name '{name}'").into())
+    }
+
+    /// Ensure `public_key` is registered in the account and return its
+    /// fingerprint.  If the key already exists a list lookup is performed to
+    /// find the matching fingerprint rather than attempting re-registration.
+    fn ensure_ssh_key(&self, public_key: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let public_key = public_key.trim();
+
+        // Use the key comment as the human-readable name, or fall back.
+        let key_name = public_key.split_whitespace().nth(2).unwrap_or("maglev-key");
+
+        let agent = build_agent();
+        let mut resp = agent
+            .post("https://api.digitalocean.com/v2/account/keys")
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send_json(serde_json::json!({
+                "name": key_name,
+                "public_key": public_key,
+            }))?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        // 201 Created — newly registered.
+        if status.as_u16() == 201 {
+            return body["ssh_key"]["fingerprint"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "Missing fingerprint in SSH key registration response".into());
+        }
+
+        // 422 Unprocessable — key already exists; find it by content.
+        if status.as_u16() == 422 {
+            return self.find_ssh_key_fingerprint(public_key);
+        }
+
+        Err(format!("Failed to register SSH key (HTTP {status}): {body}").into())
+    }
+
+    /// List all registered SSH keys and return the fingerprint of the one
+    /// whose type+blob matches `public_key`.
+    fn find_ssh_key_fingerprint(
+        &self,
+        public_key: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        // Compare only the key-type and base64 blob, ignoring the trailing
+        // comment so different comments on the same key still match.
+        let needle: String = public_key
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let agent = build_agent();
+        let mut resp = agent
+            .get("https://api.digitalocean.com/v2/account/keys?per_page=200")
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!("Failed to list SSH keys (HTTP {status}): {body}").into());
+        }
+
+        body["ssh_keys"]
+            .as_array()
+            .ok_or("No ssh_keys array in account keys response")?
+            .iter()
+            .find(|k| {
+                k["public_key"]
+                    .as_str()
+                    .map(|s| s.starts_with(&needle))
+                    .unwrap_or(false)
+            })
+            .and_then(|k| k["fingerprint"].as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "Could not find matching SSH key in DigitalOcean account".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider trait
+// ---------------------------------------------------------------------------
+
+impl Provider for DigitalOceanProvider {
+    /// Create a Droplet.
+    ///
+    /// * `machine_type`      — DO size slug or GCP-style name (mapped internally)
+    /// * `boot_disk_image`   — DO image slug or ubuntu-style shorthand (mapped internally)
+    /// * `boot_disk_size_gb` — not directly configurable in DO (disk is set by
+    ///                         the size slug); the parameter is accepted for
+    ///                         interface parity and intentionally ignored
+    /// * `ssh_keys_metadata` — `"<user>:<public-key-content>"` (GCP style) or
+    ///                         bare public key content
+    /// * `startup_script`    — passed verbatim as `user_data`
+    fn create_vm(
+        &self,
+        instance_name: &str,
+        machine_type: &str,
+        boot_disk_image: &str,
+        boot_disk_size_gb: u64,
+        ssh_keys_metadata: &str,
+        startup_script: &str,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        // Strip the "username:" prefix that the GCP path writes.
+        let public_key = match ssh_keys_metadata.find(':') {
+            Some(idx) => ssh_keys_metadata[idx + 1..].trim(),
+            None => ssh_keys_metadata.trim(),
+        };
+
+        let mut ssh_fingerprints: Vec<String> = Vec::new();
+        if !public_key.is_empty() {
+            let fp = self.ensure_ssh_key(public_key)?;
+            println!("    SSH key fingerprint: {fp}");
+            ssh_fingerprints.push(fp);
+        }
+
+        // boot_disk_size_gb: accepted for interface compatibility, not used.
+        let _ = boot_disk_size_gb;
+
+        let request_body = serde_json::json!({
+            "name":      instance_name,
+            "region":    self.region,
+            "size":      resolve_size(machine_type),
+            "image":     resolve_image(boot_disk_image),
+            "ssh_keys":  ssh_fingerprints,
+            "user_data": startup_script,
+            "tags":      ["maglev"],
+        });
+
+        let agent = build_agent();
+        let mut resp = agent
+            .post("https://api.digitalocean.com/v2/droplets")
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send_json(request_body)?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!("DigitalOcean API returned HTTP {status}: {body}").into());
+        }
+
+        Ok(body)
+    }
+
+    /// Delete a Droplet by name.  Returns a synthetic JSON confirmation
+    /// because the DO DELETE endpoint returns 204 No Content on success.
+    fn destroy_vm(&self, instance_name: &str) -> Result<Value, Box<dyn std::error::Error>> {
+        let id = self.get_droplet_id(instance_name)?;
+        let url = format!("https://api.digitalocean.com/v2/droplets/{id}");
+
+        let agent = build_agent();
+        let mut resp = agent
+            .delete(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()?;
+
+        let status = resp.status();
+
+        // 204 No Content is the success response for droplet deletion.
+        if status.as_u16() == 204 {
+            return Ok(serde_json::json!({
+                "status": "deleted",
+                "id":     id,
+                "name":   instance_name,
+            }));
+        }
+
+        let body: Value = resp.body_mut().read_json()?;
+        Err(format!("DigitalOcean API returned HTTP {status}: {body}").into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+fn build_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// Map GCP-style image names to DigitalOcean image slugs.
+/// Fully-qualified DO slugs (contain `-x64` or `-amd64`) are passed through.
+fn resolve_image(image: &str) -> String {
+    match image {
+        "ubuntu-2404-lts-amd64" | "ubuntu-24-04-x64" => "ubuntu-24-04-x64",
+        "ubuntu-2204-lts-amd64" | "ubuntu-22-04-x64" => "ubuntu-22-04-x64",
+        "ubuntu-2004-lts-amd64" | "ubuntu-20-04-x64" => "ubuntu-20-04-x64",
+        "debian-12-x64" | "debian-12" => "debian-12-x64",
+        "debian-11-x64" | "debian-11" => "debian-11-x64",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Map GCP-style machine types to DigitalOcean size slugs.
+/// Native DO size slugs (start with `s-`, `c-`, `g-`, `m-`) are passed through.
+fn resolve_size(machine_type: &str) -> String {
+    // Already a DO slug.
+    if machine_type.starts_with("s-")
+        || machine_type.starts_with("c-")
+        || machine_type.starts_with("g-")
+        || machine_type.starts_with("m-")
+        || machine_type.starts_with("so-")
+    {
+        return machine_type.to_string();
+    }
+
+    match machine_type {
+        "e2-micro" => "s-1vcpu-1gb",
+        "e2-small" => "s-1vcpu-2gb",
+        "e2-medium" => "s-2vcpu-2gb",
+        "e2-standard-2" => "s-2vcpu-4gb",
+        "e2-standard-4" => "s-4vcpu-8gb",
+        "e2-standard-8" => "s-8vcpu-16gb",
+        "e2-standard-16" => "s-16vcpu-64gb",
+        other => other,
+    }
+    .to_string()
+}

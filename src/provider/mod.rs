@@ -1,10 +1,11 @@
+pub mod digitalocean;
 pub mod gcp;
 
 /// Cloud-provider abstraction.
 ///
 /// Each implementation is responsible for holding its own authentication
-/// context (project, zone, access token, …) and exposing the two lifecycle
-/// operations that Maglev needs.
+/// context (project, zone / region, access token, …) and exposing the two
+/// lifecycle operations that Maglev needs.
 pub trait Provider {
     fn create_vm(
         &self,

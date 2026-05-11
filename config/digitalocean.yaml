@@ -21,21 +21,20 @@ digitalocean:
         set -e
 
         apt-get update
-        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/
-        cisak-v0.1.11-linux-amd64.tar.gz | tar -xz
+        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.11/cisak-v0.1.11-linux-amd64.tar.gz | tar -xz
         install -m 755 -o root -g root cisak /usr/local/bin/cisak
         cisak generate
         cisak install -y
   specs:
   - name: control-plane
     config:
-    - machine-type: e2-standard-2
-      boot-disk-image: ubuntu-2404-lts-amd64
+    - machine-type: s-2vcpu-4gb
+      boot-disk-image: ubuntu-24-04-x64
       boot-disk-size: 20
   - name: worker
     config:
-    - machine-type: e2-standard-2
-      boot-disk-image: ubuntu-2404-lts-amd64
+    - machine-type: s-2vcpu-4gb
+      boot-disk-image: ubuntu-24-04-x64
       boot-disk-size: 50
   rules:
   - group: control-plane
@@ -44,4 +43,6 @@ digitalocean:
   - group: worker
     generics: default
     specs: worker
-  credentials: {}
+  credentials:
+    token: "your-digitalocean-api-token"
+    region: nyc1
