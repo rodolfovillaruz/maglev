@@ -1,4 +1,4 @@
-use crate::ssh::ssh_run;
+use crate::ssh::{ssh_run, ssh_run_jump};
 use crate::utils::prompt_yes_no;
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,8 @@ pub fn provision_control_plane_node(
     ssh_priv_path: &str,
     cp_endpoint: &str,
     is_ha: bool,
+    any_worker_needs_jump: bool,
+    jumphost_ip: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
     // Create kubeadm config with serverTLSBootstrap enabled
@@ -44,7 +46,18 @@ serverTLSBootstrap: true
         "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{}\nKUBEADM_CONFIG_EOF",
         kubeadm_config
     );
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &config_script)?;
+    if any_worker_needs_jump {
+        ssh_run_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            &config_script,
+        )?;
+    } else {
+        ssh_run(cp_ip, ssh_user, ssh_priv_path, &config_script)?;
+    }
 
     // Build kubeadm init command using the config file
     let kubeadm_init_cmd = if is_ha {
@@ -62,10 +75,28 @@ serverTLSBootstrap: true
     }
 
     println!("\n  Running kubeadm init — this may take several minutes …\n");
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
+    if any_worker_needs_jump {
+        ssh_run_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            &kubeadm_init_cmd,
+        )?;
+    } else {
+        ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
+    }
     println!("\n  ✓ kubeadm init complete.");
 
-    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path)
+    provision_cilium(
+        cp_ip,
+        cp_name,
+        ssh_user,
+        ssh_priv_path,
+        any_worker_needs_jump,
+        jumphost_ip,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +108,8 @@ pub fn provision_cilium(
     cp_name: &str,
     ssh_user: &str,
     ssh_priv_path: &str,
+    any_worker_needs_jump: bool,
+    jumphost_ip: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step B: cilium install ────────────────────────────────────────────────
     let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
@@ -89,13 +122,37 @@ pub fn provision_cilium(
         return Ok(());
     }
 
-    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd) {
+    let result = if any_worker_needs_jump {
+        ssh_run_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            &cilium_install_cmd,
+        )
+    } else {
+        ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd)
+    };
+
+    match result {
         Ok(()) => {}
         Err(e) => {
             eprintln!("  ⚠ cilium install failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_install_cmd}");
             println!("    $ {sudo_cmd}");
-            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+            if any_worker_needs_jump {
+                ssh_run_jump(
+                    jumphost_ip,
+                    ssh_user,
+                    cp_ip,
+                    ssh_user,
+                    ssh_priv_path,
+                    &sudo_cmd,
+                )?;
+            } else {
+                ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+            }
         }
     }
     println!("\n  ✓ Cilium CNI installed.");
@@ -111,13 +168,37 @@ pub fn provision_cilium(
         return Ok(());
     }
 
-    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd) {
+    let result = if any_worker_needs_jump {
+        ssh_run_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            &cilium_status_cmd,
+        )
+    } else {
+        ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd)
+    };
+
+    match result {
         Ok(()) => {}
         Err(e) => {
             eprintln!("  ⚠ cilium status --wait failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_status_cmd}");
             println!("    $ {sudo_cmd}");
-            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+            if any_worker_needs_jump {
+                ssh_run_jump(
+                    jumphost_ip,
+                    ssh_user,
+                    cp_ip,
+                    ssh_user,
+                    ssh_priv_path,
+                    &sudo_cmd,
+                )?;
+            } else {
+                ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+            }
         }
     }
     println!("\n  ✓ Cilium is ready.");

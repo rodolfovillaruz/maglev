@@ -263,7 +263,14 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                     &cp_endpoint,
                 )?;
             }
-            provision_cilium(primary_cp_ip, primary_cp_name, ssh_user, &ssh_priv_path)?;
+            provision_cilium(
+                primary_cp_ip,
+                primary_cp_name,
+                ssh_user,
+                &ssh_priv_path,
+                any_worker_needs_jump,
+                &jumphost_ip,
+            )?;
         } else {
             provision_control_plane_node(
                 primary_cp_ip,
@@ -272,6 +279,8 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                 &ssh_priv_path,
                 &cp_endpoint,
                 is_ha,
+                any_worker_needs_jump,
+                &jumphost_ip,
             )?;
         }
     } else {
