@@ -91,35 +91,7 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     // Primary CP node is the first one in document order.
     let primary_cp_prefer_public = cp_entries[0].1;
 
-    // A worker whose own IP is private and whose reachability depends on
-    // tunnelling through the (public) primary CP node needs ProxyJump.
-    let any_worker_needs_jump =
-        worker_entries.iter().any(|(_, pp)| !pp) && primary_cp_prefer_public;
-
-    if any_worker_needs_jump {
-        println!(
-            "\n  ℹ  Some workers have private IPs and the primary control-plane has a \
-             public IP. Private-worker SSH will be routed through the primary \
-             control-plane node via ProxyJump."
-        );
-    }
-
-    // ── Resolve provisioner node (if configured) ──────────────────────────────
-    let provisioner_spec = loaded.provisioner();
-    let provisioner_node_info: Option<(String, String, bool)> = if let Some(p) = provisioner_spec {
-        println!(
-            "\n  Provisioner node configured: {} ({})",
-            p.node, p.provisioner_type
-        );
-        let pref_pub = p.provisioner_type == "public";
-        let ip = provider.get_vm_ip(&p.node, pref_pub)?;
-        println!("    IP: {ip}");
-        Some((p.node.clone(), ip, pref_pub))
-    } else {
-        None
-    };
-
-    // ── Resolve IPs ───────────────────────────────────────────────────────────
+    // ── Resolve IPs and determine jumphost ────────────────────────────────────
     println!("\n  Fetching IPs …");
 
     let cp_with_ips: Vec<(String, String)> = cp_entries
@@ -153,16 +125,22 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         .ok_or("No control-plane nodes available")?;
 
     // Determine jumphost: use provisioner if configured, otherwise use primary CP
-    let (jumphost_name, jumphost_ip, jumphost_is_public) =
-        if let Some((name, ip, is_public)) = provisioner_node_info {
-            (name, ip, is_public)
-        } else {
-            (
-                primary_cp_name.clone(),
-                primary_cp_ip.clone(),
-                primary_cp_prefer_public,
-            )
-        };
+    let (jumphost_name, jumphost_ip, jumphost_is_public) = if let Some(p) = &common.provisioner {
+        println!(
+            "\n  Provisioner node configured: {} ({})",
+            p.node, p.provisioner_type
+        );
+        let pref_pub = p.provisioner_type == "public";
+        let ip = provider.get_vm_ip(&p.node, pref_pub)?;
+        println!("    IP: {ip}");
+        (p.node.clone(), ip, pref_pub)
+    } else {
+        (
+            primary_cp_name.clone(),
+            primary_cp_ip.clone(),
+            primary_cp_prefer_public,
+        )
+    };
 
     // Determine if any worker needs jumphost routing
     let any_worker_needs_jump = worker_entries.iter().any(|(_, pp)| !pp) && jumphost_is_public;
@@ -170,7 +148,7 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     if any_worker_needs_jump {
         println!(
             "\n  ℹ  Some workers have private IPs. SSH to these nodes will be routed \
-         through {jumphost_name} ({jumphost_ip}) via ProxyJump."
+             through {jumphost_name} ({jumphost_ip}) via ProxyJump."
         );
     }
 

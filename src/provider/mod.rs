@@ -31,13 +31,6 @@ impl LoadedProvider {
         }
     }
 
-    pub fn provisioner(&self) -> &Option<ProvisionerYaml> {
-        match self {
-            LoadedProvider::Gcp { provisioner, .. } => provisioner,
-            LoadedProvider::DigitalOcean { provisioner, .. } => provisioner,
-        }
-    }
-
     pub fn provider(&self) -> &dyn Provider {
         match self {
             LoadedProvider::Gcp { provider, .. } => provider,
