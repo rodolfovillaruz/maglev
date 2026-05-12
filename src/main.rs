@@ -887,14 +887,41 @@ fn provision_control_plane_node(
     is_ha: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
-    let kubeadm_init_cmd = if is_ha {
+    // Create kubeadm config with serverTLSBootstrap enabled
+    let kubeadm_config = if is_ha {
         format!(
-            "sudo kubeadm init \
-             --control-plane-endpoint {cp_endpoint} \
-             --upload-certs"
+            r#"apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+controlPlaneEndpoint: {cp_endpoint}
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+serverTLSBootstrap: true
+"#
         )
     } else {
-        "sudo kubeadm init".to_string()
+        r#"apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+serverTLSBootstrap: true
+"#
+        .to_string()
+    };
+
+    // Write config to remote node
+    let config_script = format!(
+        "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{}\nKUBEADM_CONFIG_EOF",
+        kubeadm_config
+    );
+    ssh_run(cp_ip, ssh_user, ssh_priv_path, &config_script)?;
+
+    // Build kubeadm init command using the config file
+    let kubeadm_init_cmd = if is_ha {
+        "sudo kubeadm init --config /tmp/kubeadm-config.yaml --upload-certs"
+    } else {
+        "sudo kubeadm init --config /tmp/kubeadm-config.yaml"
     };
 
     println!("\n  → Step A: initialise the cluster with kubeadm");
