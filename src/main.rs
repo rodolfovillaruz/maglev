@@ -45,6 +45,9 @@ enum Commands {
     Play {
         /// Path to the YAML config file
         config: String,
+        /// Enable verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Reset kubeadm state on all nodes
     Reset {
@@ -798,24 +801,34 @@ fn ssh_capture_jump(
     target_user: &str,
     private_key_path: &str,
     command: &str,
+    verbose: &bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let proxy_jump = format!("ProxyJump={jump_user}@{jump_ip}");
+    let target = format!("{target_user}@{target_ip}");
+
+    let args = vec![
+        "-i",
+        private_key_path,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        &proxy_jump,
+        &target,
+        command,
+    ];
+
+    if *verbose {
+        eprintln!("[VERBOSE] ssh {}", args.join(" "));
+    }
+
     let out = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            private_key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "ConnectTimeout=15",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            &format!("ProxyJump={jump_user}@{jump_ip}"),
-            &format!("{target_user}@{target_ip}"),
-            command,
-        ])
+        .args(&args)
         .output()
         .map_err(|e| format!("Failed to spawn ssh (jump): {e}"))?;
 
@@ -837,25 +850,35 @@ fn ssh_run_jump(
     target_user: &str,
     private_key_path: &str,
     command: &str,
+    verbose: &bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let proxy_jump = format!("ProxyJump={jump_user}@{jump_ip}");
+    let target = format!("{target_user}@{target_ip}");
+
+    let args = vec![
+        "-i",
+        private_key_path,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=30",
+        "-o",
+        "LogLevel=ERROR",
+        "-t",
+        "-o",
+        &proxy_jump,
+        &target,
+        command,
+    ];
+
+    if *verbose {
+        eprintln!("[VERBOSE] ssh {}", args.join(" "));
+    }
+
     let status = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            private_key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "ConnectTimeout=30",
-            "-o",
-            "LogLevel=ERROR",
-            "-t",
-            "-o",
-            &format!("ProxyJump={jump_user}@{jump_ip}"),
-            &format!("{target_user}@{target_ip}"),
-            command,
-        ])
+        .args(&args)
         .status()
         .map_err(|e| format!("Failed to spawn ssh (jump): {e}"))?;
 
@@ -948,9 +971,10 @@ fn do_run(
     key: &str,
     jump: Option<(&str, &str)>,
     cmd: &str,
+    verbose: &bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match jump {
-        Some((ji, ju)) => ssh_run_jump(ji, ju, ip, user, key, cmd),
+        Some((ji, ju)) => ssh_run_jump(ji, ju, ip, user, key, cmd, verbose),
         None => ssh_run(ip, user, key, cmd),
     }
 }
@@ -962,9 +986,10 @@ fn do_capture(
     key: &str,
     jump: Option<(&str, &str)>,
     cmd: &str,
+    verbose: &bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match jump {
-        Some((ji, ju)) => ssh_capture_jump(ji, ju, ip, user, key, cmd),
+        Some((ji, ju)) => ssh_capture_jump(ji, ju, ip, user, key, cmd, verbose),
         None => ssh_capture(ip, user, key, cmd),
     }
 }
@@ -988,6 +1013,7 @@ fn provision_control_plane_node(
     cp_endpoint: &str,
     is_ha: bool,
     jump: Option<(&str, &str)>,
+    verbose: &bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
     let kubeadm_config = if is_ha {
@@ -1016,7 +1042,14 @@ serverTLSBootstrap: true
         "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{}\nKUBEADM_CONFIG_EOF",
         kubeadm_config
     );
-    do_run(cp_ip, ssh_user, ssh_priv_path, jump, &config_script)?;
+    do_run(
+        cp_ip,
+        ssh_user,
+        ssh_priv_path,
+        jump,
+        &config_script,
+        verbose,
+    )?;
 
     let kubeadm_init_cmd = if is_ha {
         "sudo kubeadm init --config /tmp/kubeadm-config.yaml --upload-certs"
@@ -1033,17 +1066,24 @@ serverTLSBootstrap: true
     }
 
     println!("\n  Running kubeadm init — this may take several minutes …\n");
-    do_run(cp_ip, ssh_user, ssh_priv_path, jump, kubeadm_init_cmd)?;
+    do_run(
+        cp_ip,
+        ssh_user,
+        ssh_priv_path,
+        jump,
+        kubeadm_init_cmd,
+        verbose,
+    )?;
     println!("\n  ✓ kubeadm init complete.");
 
-    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path, jump)
+    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path, jump, verbose)
 }
 
 // ---------------------------------------------------------------------------
 // `play` subcommand
 // ---------------------------------------------------------------------------
 
-fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn play_config(config_path: &str, verbose: &bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Play ===\n");
     println!("Reading config: {config_path}");
 
@@ -1214,8 +1254,26 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             primary_cp_name,
             &cp_endpoint,
             primary_cp_ip,
-            |cmd| do_capture(primary_cp_ip, ssh_user, &ssh_priv_path, primary_jump, cmd),
-            |cmd| do_run(primary_cp_ip, ssh_user, &ssh_priv_path, primary_jump, cmd),
+            |cmd| {
+                do_capture(
+                    primary_cp_ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    primary_jump,
+                    cmd,
+                    verbose,
+                )
+            },
+            |cmd| {
+                do_run(
+                    primary_cp_ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    primary_jump,
+                    cmd,
+                    verbose,
+                )
+            },
         )?;
 
         let already_init = do_capture(
@@ -1224,6 +1282,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             &ssh_priv_path,
             primary_jump,
             "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+            verbose,
         )?;
 
         if already_init.trim() == "yes" {
@@ -1236,6 +1295,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     &ssh_priv_path,
                     &cp_endpoint,
                     primary_jump,
+                    verbose,
                 )?;
             }
             provision_cilium(
@@ -1244,6 +1304,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 ssh_user,
                 &ssh_priv_path,
                 primary_jump,
+                verbose,
             )?;
         } else {
             provision_control_plane_node(
@@ -1254,6 +1315,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 &cp_endpoint,
                 is_ha,
                 primary_jump,
+                verbose,
             )?;
         }
     } else {
@@ -1281,6 +1343,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             &ssh_priv_path,
             primary_jump,
             cp_join_script,
+            verbose,
         ) {
             Ok(cmd) if !cmd.is_empty() => cmd,
             Ok(_) => {
@@ -1317,8 +1380,8 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 name,
                 &cp_endpoint,
                 primary_cp_ip,
-                |cmd| do_capture(ip, ssh_user, &ssh_priv_path, node_jump, cmd),
-                |cmd| do_run(ip, ssh_user, &ssh_priv_path, node_jump, cmd),
+                |cmd| do_capture(ip, ssh_user, &ssh_priv_path, node_jump, cmd, verbose),
+                |cmd| do_run(ip, ssh_user, &ssh_priv_path, node_jump, cmd, verbose),
             )?;
 
             let already_joined = do_capture(
@@ -1327,6 +1390,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 &ssh_priv_path,
                 node_jump,
                 "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+                verbose,
             )?;
 
             if already_joined.trim() == "yes" {
@@ -1348,6 +1412,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     &ssh_priv_path,
                     node_jump,
                     &format!("sudo {cp_join_cmd}"),
+                    verbose,
                 )?;
                 println!("\n  ✓ {name} joined as control-plane.");
             } else {
@@ -1371,6 +1436,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         &ssh_priv_path,
         primary_jump,
         "sudo kubeadm token create --print-join-command",
+        verbose,
     ) {
         Ok(cmd) if !cmd.is_empty() => cmd,
         Ok(_) => {
@@ -1413,8 +1479,8 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             name,
             &cp_endpoint,
             primary_cp_ip,
-            |cmd| do_capture(ip, ssh_user, &ssh_priv_path, worker_jump, cmd),
-            |cmd| do_run(ip, ssh_user, &ssh_priv_path, worker_jump, cmd),
+            |cmd| do_capture(ip, ssh_user, &ssh_priv_path, worker_jump, cmd, verbose),
+            |cmd| do_run(ip, ssh_user, &ssh_priv_path, worker_jump, cmd, verbose),
         )?;
 
         if worker_join_cmd.is_empty() {
@@ -1430,6 +1496,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             &ssh_priv_path,
             worker_jump,
             "systemctl is-active kubelet 2>/dev/null && echo yes || echo no",
+            verbose,
         );
 
         match already_joined {
@@ -1447,6 +1514,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             &ssh_priv_path,
             worker_jump,
             &format!("sudo {worker_join_cmd}"),
+            verbose,
         ) {
             Ok(()) => println!("\n  ✓ {name} joined."),
             Err(e) => eprintln!("  ✗ Failed to join {name}: {e}"),
@@ -1473,7 +1541,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Apply { config } => apply_config(&config),
         Commands::Destroy { config } => destroy_config(&config),
-        Commands::Play { config } => play_config(&config),
+        Commands::Play { config, verbose } => play_config(&config, &verbose),
         Commands::Reset { config } => reset_config(&config),
         Commands::Restart { config } => restart_config(&config),
         Commands::Print => print_build_credential(),
@@ -1491,6 +1559,7 @@ fn verify_control_plane_endpoint(
     ssh_priv_path: &str,
     expected_endpoint: &str,
     jump: Option<(&str, &str)>,
+    verbose: &bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Verifying controlPlaneEndpoint in kubeadm-config …");
 
@@ -1499,7 +1568,8 @@ fn verify_control_plane_endpoint(
         -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
         | grep 'controlPlaneEndpoint' || true";
 
-    let output = do_capture(cp_ip, ssh_user, ssh_priv_path, jump, script).unwrap_or_default();
+    let output =
+        do_capture(cp_ip, ssh_user, ssh_priv_path, jump, script, verbose).unwrap_or_default();
 
     let stored_endpoint = output
         .split(':')
@@ -1645,6 +1715,7 @@ fn provision_cilium(
     ssh_user: &str,
     ssh_priv_path: &str,
     jump: Option<(&str, &str)>,
+    verbose: &bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step B: cilium install ────────────────────────────────────────────────
     let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
@@ -1657,13 +1728,20 @@ fn provision_cilium(
         return Ok(());
     }
 
-    match do_run(cp_ip, ssh_user, ssh_priv_path, jump, &cilium_install_cmd) {
+    match do_run(
+        cp_ip,
+        ssh_user,
+        ssh_priv_path,
+        jump,
+        &cilium_install_cmd,
+        verbose,
+    ) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("  ⚠ cilium install failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_install_cmd}");
             println!("    $ {sudo_cmd}");
-            do_run(cp_ip, ssh_user, ssh_priv_path, jump, &sudo_cmd)?;
+            do_run(cp_ip, ssh_user, ssh_priv_path, jump, &sudo_cmd, verbose)?;
         }
     }
     println!("\n  ✓ Cilium CNI installed.");
@@ -1679,13 +1757,20 @@ fn provision_cilium(
         return Ok(());
     }
 
-    match do_run(cp_ip, ssh_user, ssh_priv_path, jump, &cilium_status_cmd) {
+    match do_run(
+        cp_ip,
+        ssh_user,
+        ssh_priv_path,
+        jump,
+        &cilium_status_cmd,
+        verbose,
+    ) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("  ⚠ cilium status --wait failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_status_cmd}");
             println!("    $ {sudo_cmd}");
-            do_run(cp_ip, ssh_user, ssh_priv_path, jump, &sudo_cmd)?;
+            do_run(cp_ip, ssh_user, ssh_priv_path, jump, &sudo_cmd, verbose)?;
         }
     }
     println!("\n  ✓ Cilium is ready.");
@@ -1797,7 +1882,7 @@ fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         sudo rm -rf /etc/cni /etc/kubernetes /var/lib/etcd /var/lib/kubelet";
 
         println!("  Running kubeadm reset …");
-        match do_run(ip, ssh_user, &ssh_priv_path, node_jump, reset_cmd) {
+        match do_run(ip, ssh_user, &ssh_priv_path, node_jump, reset_cmd, &false) {
             Ok(()) => println!("  ✓ {name} reset."),
             Err(e) => eprintln!("  ✗ Failed to reset {name}: {e}"),
         }
@@ -1904,7 +1989,14 @@ fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|jh| jh.for_node(name, *prefer_public));
 
         println!("  Sending reboot signal …");
-        match do_run(ip, ssh_user, &ssh_priv_path, node_jump, "sudo reboot") {
+        match do_run(
+            ip,
+            ssh_user,
+            &ssh_priv_path,
+            node_jump,
+            "sudo reboot",
+            &false,
+        ) {
             Ok(()) => println!("  ✓ {name} reboot initiated."),
             Err(e) => {
                 if e.to_string().contains("status") || e.to_string().contains("exited") {
