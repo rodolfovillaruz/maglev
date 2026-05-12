@@ -1,3 +1,4 @@
+mod cp;
 mod provider;
 mod ssh;
 mod utils;
@@ -8,6 +9,7 @@ use std::fs;
 
 use clap::{Parser, Subcommand};
 
+use cp::{provision_cilium, provision_control_plane_node};
 use provider::{
     Provider,
     digitalocean::{DigitalOceanCredentials, DigitalOceanProvider},
@@ -777,73 +779,6 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// Control-plane provisioning steps
-// ---------------------------------------------------------------------------
-
-const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
-
-fn provision_control_plane_node(
-    cp_ip: &str,
-    cp_name: &str,
-    ssh_user: &str,
-    ssh_priv_path: &str,
-    cp_endpoint: &str,
-    is_ha: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // ── Step A: kubeadm init ──────────────────────────────────────────────────
-    // Create kubeadm config with serverTLSBootstrap enabled
-    let kubeadm_config = if is_ha {
-        format!(
-            r#"apiVersion: kubeadm.k8s.io/v1beta3
-kind: ClusterConfiguration
-controlPlaneEndpoint: {cp_endpoint}
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-serverTLSBootstrap: true
-"#
-        )
-    } else {
-        r#"apiVersion: kubeadm.k8s.io/v1beta3
-kind: ClusterConfiguration
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-serverTLSBootstrap: true
-"#
-        .to_string()
-    };
-
-    // Write config to remote node
-    let config_script = format!(
-        "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{}\nKUBEADM_CONFIG_EOF",
-        kubeadm_config
-    );
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &config_script)?;
-
-    // Build kubeadm init command using the config file
-    let kubeadm_init_cmd = if is_ha {
-        "sudo kubeadm init --config /tmp/kubeadm-config.yaml --upload-certs"
-    } else {
-        "sudo kubeadm init --config /tmp/kubeadm-config.yaml"
-    };
-
-    println!("\n  → Step A: initialise the cluster with kubeadm");
-    println!("    $ {kubeadm_init_cmd}");
-
-    if !prompt_yes_no("  Run kubeadm init?") {
-        println!("  Skipped — aborting control-plane provisioning for {cp_name}.");
-        return Ok(());
-    }
-
-    println!("\n  Running kubeadm init — this may take several minutes …\n");
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
-    println!("\n  ✓ kubeadm init complete.");
-
-    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path)
-}
-
-// ---------------------------------------------------------------------------
 // `play` subcommand
 // ---------------------------------------------------------------------------
 
@@ -1040,16 +975,47 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             primary_cp_name,
             &cp_endpoint,
             primary_cp_ip,
-            |cmd| ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
-            |cmd| ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
+            |cmd| match any_worker_needs_jump {
+                true => ssh_capture_jump(
+                    &jumphost_ip,
+                    ssh_user,
+                    primary_cp_ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    cmd,
+                ),
+                false => ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
+            },
+            |cmd| match any_worker_needs_jump {
+                true => ssh_run_jump(
+                    &jumphost_ip,
+                    ssh_user,
+                    primary_cp_ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    cmd,
+                ),
+                false => ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
+            },
         )?;
 
-        let already_init = ssh_capture(
-            primary_cp_ip,
-            ssh_user,
-            &ssh_priv_path,
-            "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
-        )?;
+        let already_init = if any_worker_needs_jump {
+            ssh_capture_jump(
+                &jumphost_ip,
+                ssh_user,
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+            )?
+        } else {
+            ssh_capture(
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+            )?
+        };
 
         if already_init.trim() == "yes" {
             println!("  ✓ {primary_cp_name} already initialised — skipping kubeadm init.");
@@ -1465,64 +1431,6 @@ fn ensure_cp_endpoint_resolves(
         .into());
     }
 
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Cilium provisioning steps (Steps B + C)
-// ---------------------------------------------------------------------------
-
-fn provision_cilium(
-    cp_ip: &str,
-    cp_name: &str,
-    ssh_user: &str,
-    ssh_priv_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // ── Step B: cilium install ────────────────────────────────────────────────
-    let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
-
-    println!("\n  → Step B: deploy Cilium CNI");
-    println!("    $ {cilium_install_cmd}");
-
-    if !prompt_yes_no("  Run cilium install?") {
-        println!("  Skipped — Cilium CNI will not be deployed.");
-        return Ok(());
-    }
-
-    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("  ⚠ cilium install failed ({e}) — retrying with sudo …");
-            let sudo_cmd = format!("sudo {cilium_install_cmd}");
-            println!("    $ {sudo_cmd}");
-            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
-        }
-    }
-    println!("\n  ✓ Cilium CNI installed.");
-
-    // ── Step C: cilium status --wait ──────────────────────────────────────────
-    let cilium_status_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait");
-
-    println!("\n  → Step C: wait for Cilium to become ready");
-    println!("    $ {cilium_status_cmd}");
-
-    if !prompt_yes_no("  Run cilium status --wait?") {
-        println!("  Skipped — continuing without confirming Cilium health.");
-        return Ok(());
-    }
-
-    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("  ⚠ cilium status --wait failed ({e}) — retrying with sudo …");
-            let sudo_cmd = format!("sudo {cilium_status_cmd}");
-            println!("    $ {sudo_cmd}");
-            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
-        }
-    }
-    println!("\n  ✓ Cilium is ready.");
-
-    println!("\n  ✓ {cp_name} control-plane provisioning complete.");
     Ok(())
 }
 
