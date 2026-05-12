@@ -1,4 +1,7 @@
 gcp:
+  provisioner:
+    type: public
+    node: maglev-cp-alpha
   group:
   - name: public
     type: control-plane

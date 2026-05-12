@@ -192,6 +192,20 @@ struct RuleYaml {
     specs: Vec<String>,
 }
 
+/// Optional provisioner node configuration for SSH jumphost routing.
+///
+/// When defined, specifies which node should be used as a jumphost/ProxyJump
+/// target for provisioning other nodes (typically nodes with private IPs).
+///
+/// `type` — `"public"` or `"private"` determines which IP type to use from
+/// the provisioner node.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct ProvisionerYaml {
+    #[serde(rename = "type")]
+    provisioner_type: String,
+    node: String,
+}
+
 // ---------------------------------------------------------------------------
 // Custom YAML deserializer: scalar string  OR  sequence of strings
 // ---------------------------------------------------------------------------
@@ -264,6 +278,8 @@ struct GcpYaml {
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
     credentials: GcpCredentialsYaml,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provisioner: Option<ProvisionerYaml>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -277,6 +293,8 @@ struct DoYaml {
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
     credentials: DoCredentialsYaml,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provisioner: Option<ProvisionerYaml>,
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +305,7 @@ struct CommonConfig {
     groups: Vec<GroupYaml>,
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
+    provisioner: Option<ProvisionerYaml>,
 }
 
 enum LoadedProvider {
@@ -294,11 +313,13 @@ enum LoadedProvider {
         common: CommonConfig,
         location: String,
         identity: String,
+        provisioner: Option<ProvisionerYaml>,
         provider: GcpProvider,
     },
     DigitalOcean {
         common: CommonConfig,
         location: String,
+        provisioner: Option<ProvisionerYaml>,
         provider: DigitalOceanProvider,
     },
 }
@@ -308,6 +329,13 @@ impl LoadedProvider {
         match self {
             LoadedProvider::Gcp { common, .. } => common,
             LoadedProvider::DigitalOcean { common, .. } => common,
+        }
+    }
+
+    fn provisioner(&self) -> &Option<ProvisionerYaml> {
+        match self {
+            LoadedProvider::Gcp { provisioner, .. } => provisioner,
+            LoadedProvider::DigitalOcean { provisioner, .. } => provisioner,
         }
     }
 
@@ -321,15 +349,28 @@ impl LoadedProvider {
     fn describe(&self) {
         match self {
             LoadedProvider::Gcp {
-                location, identity, ..
+                location,
+                identity,
+                provisioner,
+                ..
             } => {
                 println!("  Provider:        GCP");
                 println!("  Zone:            {location}");
                 println!("  Service account: {identity}");
+                if let Some(p) = provisioner {
+                    println!("  Provisioner:     {} ({})", p.node, p.provisioner_type);
+                }
             }
-            LoadedProvider::DigitalOcean { location, .. } => {
+            LoadedProvider::DigitalOcean {
+                location,
+                provisioner,
+                ..
+            } => {
                 println!("  Provider:        DigitalOcean");
                 println!("  Region:          {location}");
+                if let Some(p) = provisioner {
+                    println!("  Provisioner:     {} ({})", p.node, p.provisioner_type);
+                }
             }
         }
     }
@@ -362,6 +403,7 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
 
         let location = creds.zone.clone();
         let identity = creds.client_email.clone();
+        let provisioner = yaml.provisioner.clone();
         let provider = GcpProvider::new(&creds)?;
 
         Ok(LoadedProvider::Gcp {
@@ -369,9 +411,11 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
                 groups: yaml.group,
                 specs: yaml.specs,
                 rules: yaml.rules,
+                provisioner: yaml.provisioner,
             },
             location,
             identity,
+            provisioner,
             provider,
         })
     } else if raw.get("digitalocean").is_some() {
@@ -387,6 +431,7 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
         };
 
         let location = creds.region.clone();
+        let provisioner = yaml.provisioner.clone();
         let provider = DigitalOceanProvider::new(&creds)?;
 
         Ok(LoadedProvider::DigitalOcean {
@@ -394,8 +439,10 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
                 groups: yaml.group,
                 specs: yaml.specs,
                 rules: yaml.rules,
+                provisioner: yaml.provisioner,
             },
             location,
+            provisioner,
             provider,
         })
     } else {
@@ -1038,6 +1085,21 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // ── Resolve provisioner node (if configured) ──────────────────────────────
+    let provisioner_spec = loaded.provisioner();
+    let provisioner_node_info: Option<(String, String, bool)> = if let Some(p) = provisioner_spec {
+        println!(
+            "\n  Provisioner node configured: {} ({})",
+            p.node, p.provisioner_type
+        );
+        let pref_pub = p.provisioner_type == "public";
+        let ip = provider.get_vm_ip(&p.node, pref_pub)?;
+        println!("    IP: {ip}");
+        Some((p.node.clone(), ip, pref_pub))
+    } else {
+        None
+    };
+
     // ── Resolve IPs ───────────────────────────────────────────────────────────
     println!("\n  Fetching IPs …");
 
@@ -1070,6 +1132,28 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let (primary_cp_name, primary_cp_ip) = cp_with_ips
         .first()
         .ok_or("No control-plane nodes available")?;
+
+    // Determine jumphost: use provisioner if configured, otherwise use primary CP
+    let (jumphost_name, jumphost_ip, jumphost_is_public) =
+        if let Some((name, ip, is_public)) = provisioner_node_info {
+            (name, ip, is_public)
+        } else {
+            (
+                primary_cp_name.clone(),
+                primary_cp_ip.clone(),
+                primary_cp_prefer_public,
+            )
+        };
+
+    // Determine if any worker needs jumphost routing
+    let any_worker_needs_jump = worker_entries.iter().any(|(_, pp)| !pp) && jumphost_is_public;
+
+    if any_worker_needs_jump {
+        println!(
+            "\n  ℹ  Some workers have private IPs. SSH to these nodes will be routed \
+         through {jumphost_name} ({jumphost_ip}) via ProxyJump."
+        );
+    }
 
     // ── Determine the stable control-plane endpoint ───────────────────────────
     let cp_endpoint: String = match &first_cp_merged.control_plane_endpoint {
@@ -1260,12 +1344,12 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .zip(worker_entries.iter())
         .enumerate()
     {
-        let needs_jump = !prefer_public && primary_cp_prefer_public;
+        let needs_jump = !prefer_public && jumphost_is_public;
 
         println!("\n  [{}/{}] {name}  ({ip})", idx + 1, worker_with_ips.len());
 
         if needs_jump {
-            println!("    (routing through {primary_cp_name} @ {primary_cp_ip} via ProxyJump)");
+            println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
         }
 
         if !prompt_yes_no("  Fetch join command and join?") {
@@ -1278,9 +1362,9 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                primary_cp_ip,
-                |cmd| ssh_capture_jump(primary_cp_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run_jump(primary_cp_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                &jumphost_ip,
+                |cmd| ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                |cmd| ssh_run_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
             )?;
         } else {
             ensure_cp_endpoint_resolves(
