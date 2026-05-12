@@ -16,7 +16,7 @@ use yaml::{SpecConfigYaml, SpecYaml};
 
 use clap::{Parser, Subcommand};
 
-use cp::{provision_cilium, provision_control_plane_node};
+use cp::provision_control_plane_node;
 use provider::{gcp::print_build_credential, load_provider};
 
 use utils::{expand_tilde, prompt_yes_no, read_ssh_public_key};
