@@ -1,4 +1,5 @@
 use crate::provider::Provider;
+use crate::yaml::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -351,4 +352,25 @@ fn resolve_size(machine_type: &str) -> String {
         other => other,
     }
     .to_string()
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DoRoot {
+    pub digitalocean: DoYaml,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DoCredentialsYaml {
+    pub token: String,
+    pub region: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DoYaml {
+    pub group: Vec<GroupYaml>,
+    pub specs: Vec<SpecYaml>,
+    pub rules: Vec<RuleYaml>,
+    pub credentials: DoCredentialsYaml,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioner: Option<ProvisionerYaml>,
 }

@@ -1,6 +1,43 @@
+use crate::SpecYaml;
 use std::env;
 use std::fs::read_to_string;
 use std::io::{BufRead, Write, stdin, stdout};
+
+// ---------------------------------------------------------------------------
+// Custom YAML deserializer: scalar string  OR  sequence of strings
+// ---------------------------------------------------------------------------
+
+pub fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or a sequence of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
+}
 
 // ---------------------------------------------------------------------------
 // SSH public-key helper
@@ -56,4 +93,21 @@ pub fn prompt_yes_no(question: &str) -> bool {
         .expect("Failed to read input");
 
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+// ---------------------------------------------------------------------------
+// Spec validation (pre-merge, informational only)
+// ---------------------------------------------------------------------------
+
+pub fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Error>> {
+    for spec in specs {
+        for (i, cfg) in spec.config.iter().enumerate() {
+            let ip_str = cfg
+                .ip_address
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "private (default)".to_string());
+            println!("  spec '{}' [{}]: ip-address = {}", spec.name, i, ip_str);
+        }
+    }
+    Ok(())
 }

@@ -1,5 +1,6 @@
 use crate::provider::Provider;
 use crate::utils::prompt_yes_no;
+use crate::yaml::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
 use std::io::{BufRead, Write, stdin, stdout};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,21 @@ pub struct GcpCredentials {
     pub client_email: String,
     /// Path to the PEM private key file.
     pub private_key_path: String,
+    pub project_id: String,
+    pub zone: String,
+}
+
+// ---------------------------------------------------------------------------
+// Provider-specific credential types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct GcpCredentialsYaml {
+    #[serde(rename = "client-email")]
+    pub client_email: String,
+    #[serde(rename = "private-key")]
+    pub private_key: String,
+    #[serde(rename = "project-id")]
     pub project_id: String,
     pub zone: String,
 }
@@ -510,4 +526,19 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
     let private_key = RsaPrivateKey::new(&mut rng, 2048)?;
     let pem = private_key.to_pkcs8_pem(LineEnding::LF)?;
     Ok(pem.to_string())
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct GcpYaml {
+    pub group: Vec<GroupYaml>,
+    pub specs: Vec<SpecYaml>,
+    pub rules: Vec<RuleYaml>,
+    pub credentials: GcpCredentialsYaml,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioner: Option<ProvisionerYaml>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct GcpRoot {
+    pub gcp: GcpYaml,
 }
