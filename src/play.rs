@@ -1,5 +1,5 @@
 use crate::IpAddressType;
-use crate::ensure_cp_endpoint_resolves;
+use crate::cp::{ensure_cp_endpoint_resolves, verify_control_plane_endpoint};
 use crate::expand_tilde;
 use crate::prompt_yes_no;
 use crate::provider::load_provider;
@@ -11,7 +11,6 @@ use crate::ssh_capture;
 use crate::ssh_capture_jump;
 use crate::ssh_run;
 use crate::ssh_run_jump;
-use crate::verify_control_plane_endpoint;
 
 // ---------------------------------------------------------------------------
 // `play` subcommand
