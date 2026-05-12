@@ -260,6 +260,8 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                     ssh_user,
                     &ssh_priv_path,
                     &cp_endpoint,
+                    any_worker_needs_jump,
+                    &jumphost_ip,
                 )?;
             }
             provision_cilium(

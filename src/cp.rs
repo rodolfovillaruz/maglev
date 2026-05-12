@@ -1,5 +1,6 @@
 use crate::ssh::{ssh_run, ssh_run_jump};
 use crate::ssh_capture;
+use crate::ssh_capture_jump;
 use crate::utils::prompt_yes_no;
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,8 @@ pub fn verify_control_plane_endpoint(
     ssh_user: &str,
     ssh_priv_path: &str,
     expected_endpoint: &str,
+    any_worker_needs_jump: bool,
+    jumphost_ip: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Verifying controlPlaneEndpoint in kubeadm-config …");
 
@@ -226,7 +229,19 @@ pub fn verify_control_plane_endpoint(
         -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
         | grep 'controlPlaneEndpoint' || true";
 
-    let output = ssh_capture(cp_ip, ssh_user, ssh_priv_path, script).unwrap_or_default();
+    let output = if any_worker_needs_jump {
+        ssh_capture_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            script,
+        )
+        .unwrap_or_default()
+    } else {
+        ssh_capture(cp_ip, ssh_user, ssh_priv_path, script).unwrap_or_default()
+    };
 
     let stored_endpoint = output
         .split(':')
