@@ -91,34 +91,45 @@ impl std::fmt::Display for IpAddressType {
 }
 
 // ---------------------------------------------------------------------------
+// Provisioner config
+// ---------------------------------------------------------------------------
+
+/// Identifies the bastion / jump-host node used by `play`, `reset`, and
+/// `restart` to reach nodes with private IP addresses.
+///
+/// ```yaml
+/// provisioner:
+///   type: public   # "public" or "private" — which IP to use when connecting
+///   node: my-cp-1  # name of the VM that acts as the jump host
+/// ```
+///
+/// When absent the subcommands fall back to the legacy implicit rule: if the
+/// primary control-plane node has a public IP it is used as the bastion.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ProvisionerYaml {
+    /// IP-address type to use when connecting *to* the provisioner node.
+    #[serde(rename = "type")]
+    ip_type: IpAddressType,
+    /// VM name of the jump-host / bastion node.
+    node: String,
+}
+
+// ---------------------------------------------------------------------------
 // Shared YAML types
 // ---------------------------------------------------------------------------
 
 /// A named group of node names.
-///
-/// `group_type` must be `"control-plane"` or `"worker"` and determines how
-/// `play` treats the nodes in this group.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct GroupYaml {
     name: String,
-    /// Role of every node in this group.  Accepted values: `"control-plane"`,
-    /// `"worker"`.
     #[serde(rename = "type")]
     group_type: String,
     node: Vec<String>,
 }
 
-/// A unified spec entry.  All fields are optional so that multiple spec
-/// entries can be **merged** by a rule: a base spec (e.g. `cisak`) provides
-/// the common fields (user, script, SSH key, machine type, image) while a
-/// role-specific spec (e.g. `control-plane-public`) contributes only the
-/// fields that differ (disk size, ip-address).
-///
-/// After merging, every required field must be present or `resolve_rules`
-/// returns an error.
+/// A unified spec entry (all fields optional; merged left-to-right by rules).
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct SpecConfigYaml {
-    // ── generics-origin fields ──────────────────────────────────────────────
     #[serde(
         rename = "ssh-public-key",
         default,
@@ -132,8 +143,6 @@ struct SpecConfigYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user: Option<String>,
 
-    /// Optional stable address for the Kubernetes API server load-balancer.
-    /// Format: `<host>` or `<host>:<port>` (port defaults to 6443).
     #[serde(
         rename = "control-plane-endpoint",
         default,
@@ -141,7 +150,6 @@ struct SpecConfigYaml {
     )]
     control_plane_endpoint: Option<String>,
 
-    // ── specs-origin fields ─────────────────────────────────────────────────
     #[serde(
         rename = "machine-type",
         default,
@@ -163,7 +171,6 @@ struct SpecConfigYaml {
     )]
     boot_disk_size: Option<u64>,
 
-    /// When absent, defaults to `private` after merging.
     #[serde(
         rename = "ip-address",
         default,
@@ -178,13 +185,6 @@ struct SpecYaml {
     config: Vec<SpecConfigYaml>,
 }
 
-/// A rule maps one or more group names to an ordered list of spec names.
-///
-/// The specs are merged left-to-right: later entries win for any field both
-/// define.  The merged result must satisfy every required field.
-///
-/// `group` accepts either a YAML scalar (`group: my-group`) or a YAML
-/// sequence (`group: [a, b]`) for maximum authoring convenience.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct RuleYaml {
     #[serde(deserialize_with = "string_or_vec")]
@@ -264,6 +264,10 @@ struct GcpYaml {
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
     credentials: GcpCredentialsYaml,
+    /// Optional bastion / jump-host config.  When absent the legacy implicit
+    /// rule applies (primary CP with public IP is used as jump host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provisioner: Option<ProvisionerYaml>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -277,6 +281,10 @@ struct DoYaml {
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
     credentials: DoCredentialsYaml,
+    /// Optional bastion / jump-host config.  When absent the legacy implicit
+    /// rule applies (primary CP with public IP is used as jump host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provisioner: Option<ProvisionerYaml>,
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +295,8 @@ struct CommonConfig {
     groups: Vec<GroupYaml>,
     specs: Vec<SpecYaml>,
     rules: Vec<RuleYaml>,
+    /// Resolved from `gcp.provisioner` / `digitalocean.provisioner`.
+    provisioner: Option<ProvisionerYaml>,
 }
 
 enum LoadedProvider {
@@ -369,6 +379,7 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
                 groups: yaml.group,
                 specs: yaml.specs,
                 rules: yaml.rules,
+                provisioner: yaml.provisioner,
             },
             location,
             identity,
@@ -394,6 +405,7 @@ fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::Error
                 groups: yaml.group,
                 specs: yaml.specs,
                 rules: yaml.rules,
+                provisioner: yaml.provisioner,
             },
             location,
             provider,
@@ -428,17 +440,11 @@ fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Error>> 
 // Spec merging
 // ---------------------------------------------------------------------------
 
-/// The fully resolved, non-optional view of a node's configuration produced
-/// by merging one or more [`SpecConfigYaml`] entries left-to-right.
-///
-/// Every field is required; `merge_spec_configs` returns an error when any
-/// mandatory field is absent after the merge pass.
 #[derive(Debug, Clone)]
 struct MergedSpec {
     machine_type: String,
     boot_disk_image: String,
     boot_disk_size: u64,
-    /// Defaults to [`IpAddressType::Private`] when no spec sets it.
     ip_address: IpAddressType,
     ssh_public_key: String,
     script: String,
@@ -446,9 +452,6 @@ struct MergedSpec {
     control_plane_endpoint: Option<String>,
 }
 
-/// Merge `spec_names` (in order) from `specs_map` into a single
-/// [`MergedSpec`].  Later entries override earlier ones for any field both
-/// define.
 fn merge_spec_configs(
     spec_names: &[String],
     specs_map: &HashMap<&str, &SpecConfigYaml>,
@@ -517,32 +520,21 @@ fn merge_spec_configs(
 // Rule resolution (provider-agnostic)
 // ---------------------------------------------------------------------------
 
-/// The fully resolved view of a single rule: group metadata, the ordered list
-/// of spec names, all node names collected from the referenced groups, and the
-/// merged spec ready for use.
 struct ResolvedRule {
-    /// Names of every group referenced by this rule.
     group_names: Vec<String>,
-    /// The shared `type` of all groups in this rule (`"control-plane"` /
-    /// `"worker"`).
     group_type: String,
-    /// Names of every spec referenced by this rule (merge order).
     spec_names: Vec<String>,
-    /// Every node name collected from all referenced groups.
     nodes: Vec<String>,
-    /// Result of merging all referenced specs left-to-right.
     merged: MergedSpec,
 }
 
 fn resolve_rules(common: &CommonConfig) -> Result<Vec<ResolvedRule>, Box<dyn std::error::Error>> {
-    // Index groups by name → (type, nodes)
     let groups: HashMap<&str, (&str, &[String])> = common
         .groups
         .iter()
         .map(|g| (g.name.as_str(), (g.group_type.as_str(), g.node.as_slice())))
         .collect();
 
-    // Index specs by name → first config entry
     let specs_map: HashMap<&str, &SpecConfigYaml> = common
         .specs
         .iter()
@@ -553,7 +545,6 @@ fn resolve_rules(common: &CommonConfig) -> Result<Vec<ResolvedRule>, Box<dyn std
         .rules
         .iter()
         .map(|rule| {
-            // Collect nodes and validate that all groups share the same type
             let mut nodes: Vec<String> = Vec::new();
             let mut resolved_type: Option<&str> = None;
 
@@ -581,7 +572,6 @@ fn resolve_rules(common: &CommonConfig) -> Result<Vec<ResolvedRule>, Box<dyn std
                 .ok_or_else(|| "Rule has an empty group list".to_string())?
                 .to_string();
 
-            // Merge specs
             let merged = merge_spec_configs(&rule.specs, &specs_map)?;
 
             Ok(ResolvedRule {
@@ -695,7 +685,7 @@ fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n── Instances to destroy ─────────────────────────────────────────────────");
 
-    let mut all_nodes: Vec<(&str, &str, &str)> = Vec::new(); // (group_name, group_type, node)
+    let mut all_nodes: Vec<(&str, &str, &str)> = Vec::new();
     for group in &common.groups {
         for node in &group.node {
             println!("  [{}] {}  →  {}", group.group_type, group.name, node);
@@ -880,11 +870,116 @@ fn ssh_run_jump(
 }
 
 // ---------------------------------------------------------------------------
+// Jump-host resolution
+// ---------------------------------------------------------------------------
+
+/// Resolved jump-host: its node name and the IP address to dial.
+///
+/// Stored as owned strings so it can be passed freely across call sites
+/// without lifetime gymnastics.
+struct JumpHost {
+    node: String,
+    ip: String,
+    user: String,
+}
+
+impl JumpHost {
+    /// Return `Some((&jump_ip, &jump_user))` when `node_name` is *not* the
+    /// jump host itself and `prefer_public` is `false` (the node has a private
+    /// IP that requires tunnelling).
+    fn for_node<'a>(&'a self, node_name: &str, prefer_public: bool) -> Option<(&'a str, &'a str)> {
+        if prefer_public || node_name == self.node {
+            None
+        } else {
+            Some((self.ip.as_str(), self.user.as_str()))
+        }
+    }
+}
+
+/// Determine the jump host from the config:
+///
+/// 1. Use `provisioner` when explicitly configured.
+/// 2. Fall back to the legacy rule: if the primary control-plane node has a
+///    public IP, use it as the implicit bastion (backward-compatible).
+fn resolve_jump_host(
+    provisioner: Option<&ProvisionerYaml>,
+    primary_cp_name: &str,
+    primary_cp_ip: &str,
+    primary_cp_prefer_public: bool,
+    ssh_user: &str,
+    provider: &dyn Provider,
+) -> Result<Option<JumpHost>, Box<dyn std::error::Error>> {
+    if let Some(prov) = provisioner {
+        let prefer_public = prov.ip_type == IpAddressType::Public;
+        let ip = provider
+            .get_vm_ip(&prov.node, prefer_public)
+            .map_err(|e| format!("Cannot resolve provisioner node '{}': {e}", prov.node))?;
+
+        println!(
+            "\n  Provisioner (jump host): {} → {}  ({} IP)",
+            prov.node, ip, prov.ip_type
+        );
+
+        Ok(Some(JumpHost {
+            node: prov.node.clone(),
+            ip,
+            user: ssh_user.to_string(),
+        }))
+    } else if primary_cp_prefer_public {
+        // Legacy fallback — primary CP is implicitly the bastion.
+        Ok(Some(JumpHost {
+            node: primary_cp_name.to_string(),
+            ip: primary_cp_ip.to_string(),
+            user: ssh_user.to_string(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch helpers (direct  OR  via jump host)
+// ---------------------------------------------------------------------------
+
+/// Call `ssh_run` or `ssh_run_jump` depending on whether `jump` is `Some`.
+fn do_run(
+    ip: &str,
+    user: &str,
+    key: &str,
+    jump: Option<(&str, &str)>,
+    cmd: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match jump {
+        Some((ji, ju)) => ssh_run_jump(ji, ju, ip, user, key, cmd),
+        None => ssh_run(ip, user, key, cmd),
+    }
+}
+
+/// Call `ssh_capture` or `ssh_capture_jump` depending on whether `jump` is `Some`.
+fn do_capture(
+    ip: &str,
+    user: &str,
+    key: &str,
+    jump: Option<(&str, &str)>,
+    cmd: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match jump {
+        Some((ji, ju)) => ssh_capture_jump(ji, ju, ip, user, key, cmd),
+        None => ssh_capture(ip, user, key, cmd),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Control-plane provisioning steps
 // ---------------------------------------------------------------------------
 
 const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
 
+/// Initialise the primary control-plane node with kubeadm, then install
+/// and verify Cilium.
+///
+/// `jump` — when `Some((jump_ip, jump_user))` every SSH command is tunnelled
+/// through the specified ProxyJump host.  Pass `None` to connect directly.
 fn provision_control_plane_node(
     cp_ip: &str,
     cp_name: &str,
@@ -892,9 +987,9 @@ fn provision_control_plane_node(
     ssh_priv_path: &str,
     cp_endpoint: &str,
     is_ha: bool,
+    jump: Option<(&str, &str)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
-    // Create kubeadm config with serverTLSBootstrap enabled
     let kubeadm_config = if is_ha {
         format!(
             r#"apiVersion: kubeadm.k8s.io/v1beta3
@@ -917,14 +1012,12 @@ serverTLSBootstrap: true
         .to_string()
     };
 
-    // Write config to remote node
     let config_script = format!(
         "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{}\nKUBEADM_CONFIG_EOF",
         kubeadm_config
     );
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &config_script)?;
+    do_run(cp_ip, ssh_user, ssh_priv_path, jump, &config_script)?;
 
-    // Build kubeadm init command using the config file
     let kubeadm_init_cmd = if is_ha {
         "sudo kubeadm init --config /tmp/kubeadm-config.yaml --upload-certs"
     } else {
@@ -940,10 +1033,10 @@ serverTLSBootstrap: true
     }
 
     println!("\n  Running kubeadm init — this may take several minutes …\n");
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
+    do_run(cp_ip, ssh_user, ssh_priv_path, jump, kubeadm_init_cmd)?;
     println!("\n  ✓ kubeadm init complete.");
 
-    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path)
+    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path, jump)
 }
 
 // ---------------------------------------------------------------------------
@@ -964,12 +1057,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_rules(common)?;
 
     // ── Partition resolved rules into CP and worker node lists ────────────────
-    //
-    // Each entry carries:  (node_name, prefer_public)
-    // The SSH config (user, key, control-plane-endpoint) is taken from the
-    // first control-plane rule's merged spec — all rules in the example share
-    // the same `cisak` base spec so these values are identical across the
-    // cluster.
     let mut cp_entries: Vec<(String, bool)> = Vec::new();
     let mut worker_entries: Vec<(String, bool)> = Vec::new();
     let mut first_cp_merged: Option<&MergedSpec> = None;
@@ -1022,22 +1109,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let is_ha = cp_count >= 3;
 
-    // Primary CP node is the first one in document order.
-    let primary_cp_prefer_public = cp_entries[0].1;
-
-    // A worker whose own IP is private and whose reachability depends on
-    // tunnelling through the (public) primary CP node needs ProxyJump.
-    let any_worker_needs_jump =
-        worker_entries.iter().any(|(_, pp)| !pp) && primary_cp_prefer_public;
-
-    if any_worker_needs_jump {
-        println!(
-            "\n  ℹ  Some workers have private IPs and the primary control-plane has a \
-             public IP. Private-worker SSH will be routed through the primary \
-             control-plane node via ProxyJump."
-        );
-    }
-
     // ── Resolve IPs ───────────────────────────────────────────────────────────
     println!("\n  Fetching IPs …");
 
@@ -1071,6 +1142,38 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .first()
         .ok_or("No control-plane nodes available")?;
 
+    let primary_cp_prefer_public = cp_entries[0].1;
+
+    // ── Resolve jump host ─────────────────────────────────────────────────────
+    //
+    // Precedence:
+    //   1. Explicit `provisioner` block in the YAML config.
+    //   2. Legacy implicit rule: primary CP with a public IP acts as bastion.
+    let jump_host: Option<JumpHost> = resolve_jump_host(
+        common.provisioner.as_ref(),
+        primary_cp_name,
+        primary_cp_ip,
+        primary_cp_prefer_public,
+        ssh_user,
+        provider,
+    )?;
+
+    // Informational: which workers need ProxyJump?
+    let any_worker_needs_jump = jump_host.as_ref().map_or(false, |jh| {
+        worker_entries
+            .iter()
+            .any(|(name, pp)| jh.for_node(name, *pp).is_some())
+    });
+
+    if any_worker_needs_jump {
+        let jh = jump_host.as_ref().unwrap();
+        println!(
+            "\n  ℹ  Some workers have private IPs; SSH will be routed through \
+             the provisioner node ({} @ {}) via ProxyJump.",
+            jh.node, jh.ip
+        );
+    }
+
     // ── Determine the stable control-plane endpoint ───────────────────────────
     let cp_endpoint: String = match &first_cp_merged.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
@@ -1101,19 +1204,25 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━ Step 1 / 3 — Primary control-plane init ({primary_cp_name}) ━━━━━━━━━━━━");
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
 
+    // Jump params for the primary CP (None when it IS the jump host or is public).
+    let primary_jump = jump_host
+        .as_ref()
+        .and_then(|jh| jh.for_node(primary_cp_name, primary_cp_prefer_public));
+
     if prompt_yes_no(&format!("  SSH-check and provision {primary_cp_name}?")) {
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
             primary_cp_ip,
-            |cmd| ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
-            |cmd| ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
+            |cmd| do_capture(primary_cp_ip, ssh_user, &ssh_priv_path, primary_jump, cmd),
+            |cmd| do_run(primary_cp_ip, ssh_user, &ssh_priv_path, primary_jump, cmd),
         )?;
 
-        let already_init = ssh_capture(
+        let already_init = do_capture(
             primary_cp_ip,
             ssh_user,
             &ssh_priv_path,
+            primary_jump,
             "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
         )?;
 
@@ -1126,9 +1235,16 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     ssh_user,
                     &ssh_priv_path,
                     &cp_endpoint,
+                    primary_jump,
                 )?;
             }
-            provision_cilium(primary_cp_ip, primary_cp_name, ssh_user, &ssh_priv_path)?;
+            provision_cilium(
+                primary_cp_ip,
+                primary_cp_name,
+                ssh_user,
+                &ssh_priv_path,
+                primary_jump,
+            )?;
         } else {
             provision_control_plane_node(
                 primary_cp_ip,
@@ -1137,6 +1253,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 &ssh_priv_path,
                 &cp_endpoint,
                 is_ha,
+                primary_jump,
             )?;
         }
     } else {
@@ -1158,8 +1275,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             BASE=$(sudo kubeadm token create --print-join-command) && \
             echo \"$BASE --control-plane --certificate-key $CERT_KEY\"";
 
-        let cp_join_cmd = match ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cp_join_script)
-        {
+        let cp_join_cmd = match do_capture(
+            primary_cp_ip,
+            ssh_user,
+            &ssh_priv_path,
+            primary_jump,
+            cp_join_script,
+        ) {
             Ok(cmd) if !cmd.is_empty() => cmd,
             Ok(_) => {
                 eprintln!(
@@ -1174,7 +1296,6 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // cp_entries[1..] parallel-tracks cp_with_ips[1..]
         for (idx, ((name, ip), (_, prefer_public))) in cp_with_ips
             .iter()
             .skip(1)
@@ -1188,22 +1309,23 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            // Additional CP nodes that have private IPs are assumed to be
-            // reachable directly (VPN / internal routing).  If they are not,
-            // the operator will see an SSH timeout here.
-            let _ = prefer_public; // used only to choose ip — already reflected in `ip`
+            let node_jump = jump_host
+                .as_ref()
+                .and_then(|jh| jh.for_node(name, *prefer_public));
+
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
                 primary_cp_ip,
-                |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+                |cmd| do_capture(ip, ssh_user, &ssh_priv_path, node_jump, cmd),
+                |cmd| do_run(ip, ssh_user, &ssh_priv_path, node_jump, cmd),
             )?;
 
-            let already_joined = ssh_capture(
+            let already_joined = do_capture(
                 ip,
                 ssh_user,
                 &ssh_priv_path,
+                node_jump,
                 "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
             )?;
 
@@ -1220,7 +1342,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             println!("  Join command: {cp_join_cmd}");
             if prompt_yes_no("  Run join command?") {
                 println!("\n  Joining {name} as control-plane node …\n");
-                ssh_run(ip, ssh_user, &ssh_priv_path, &format!("sudo {cp_join_cmd}"))?;
+                do_run(
+                    ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    node_jump,
+                    &format!("sudo {cp_join_cmd}"),
+                )?;
                 println!("\n  ✓ {name} joined as control-plane.");
             } else {
                 println!("  Skipped.");
@@ -1237,10 +1365,11 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         worker_with_ips.len()
     );
 
-    let worker_join_cmd = match ssh_capture(
+    let worker_join_cmd = match do_capture(
         primary_cp_ip,
         ssh_user,
         &ssh_priv_path,
+        primary_jump,
         "sudo kubeadm token create --print-join-command",
     ) {
         Ok(cmd) if !cmd.is_empty() => cmd,
@@ -1254,18 +1383,25 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // worker_entries[i] and worker_with_ips[i] are aligned
     for (idx, ((name, ip), (_, prefer_public))) in worker_with_ips
         .iter()
         .zip(worker_entries.iter())
         .enumerate()
     {
-        let needs_jump = !prefer_public && primary_cp_prefer_public;
+        let worker_jump = jump_host
+            .as_ref()
+            .and_then(|jh| jh.for_node(name, *prefer_public));
+
+        let needs_jump = worker_jump.is_some();
 
         println!("\n  [{}/{}] {name}  ({ip})", idx + 1, worker_with_ips.len());
 
         if needs_jump {
-            println!("    (routing through {primary_cp_name} @ {primary_cp_ip} via ProxyJump)");
+            let jh = jump_host.as_ref().unwrap();
+            println!(
+                "    (routing through {} @ {} via ProxyJump)",
+                jh.node, jh.ip
+            );
         }
 
         if !prompt_yes_no("  Fetch join command and join?") {
@@ -1273,24 +1409,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        // DNS guard — use the appropriate SSH path per worker topology
-        if needs_jump {
-            ensure_cp_endpoint_resolves(
-                name,
-                &cp_endpoint,
-                primary_cp_ip,
-                |cmd| ssh_capture_jump(primary_cp_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run_jump(primary_cp_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
-            )?;
-        } else {
-            ensure_cp_endpoint_resolves(
-                name,
-                &cp_endpoint,
-                primary_cp_ip,
-                |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
-            )?;
-        }
+        ensure_cp_endpoint_resolves(
+            name,
+            &cp_endpoint,
+            primary_cp_ip,
+            |cmd| do_capture(ip, ssh_user, &ssh_priv_path, worker_jump, cmd),
+            |cmd| do_run(ip, ssh_user, &ssh_priv_path, worker_jump, cmd),
+        )?;
 
         if worker_join_cmd.is_empty() {
             eprintln!("  ✗ No join command available — skipping {name}.");
@@ -1299,23 +1424,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         println!("  Join command: {worker_join_cmd}");
 
-        let already_joined = if needs_jump {
-            ssh_capture_jump(
-                primary_cp_ip,
-                ssh_user,
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                "systemctl is-active kubelet 2>/dev/null && echo yes || echo no",
-            )
-        } else {
-            ssh_capture(
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                "systemctl is-active kubelet 2>/dev/null && echo yes || echo no",
-            )
-        };
+        let already_joined = do_capture(
+            ip,
+            ssh_user,
+            &ssh_priv_path,
+            worker_jump,
+            "systemctl is-active kubelet 2>/dev/null && echo yes || echo no",
+        );
 
         match already_joined {
             Ok(ref s) if s.trim() == "yes" => {
@@ -1326,22 +1441,13 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!("\n  Joining {name} …\n");
-        let join_full = format!("sudo {worker_join_cmd}");
-
-        let result = if needs_jump {
-            ssh_run_jump(
-                primary_cp_ip,
-                ssh_user,
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                &join_full,
-            )
-        } else {
-            ssh_run(ip, ssh_user, &ssh_priv_path, &join_full)
-        };
-
-        match result {
+        match do_run(
+            ip,
+            ssh_user,
+            &ssh_priv_path,
+            worker_jump,
+            &format!("sudo {worker_join_cmd}"),
+        ) {
             Ok(()) => println!("\n  ✓ {name} joined."),
             Err(e) => eprintln!("  ✗ Failed to join {name}: {e}"),
         }
@@ -1384,6 +1490,7 @@ fn verify_control_plane_endpoint(
     ssh_user: &str,
     ssh_priv_path: &str,
     expected_endpoint: &str,
+    jump: Option<(&str, &str)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Verifying controlPlaneEndpoint in kubeadm-config …");
 
@@ -1392,7 +1499,7 @@ fn verify_control_plane_endpoint(
         -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
         | grep 'controlPlaneEndpoint' || true";
 
-    let output = ssh_capture(cp_ip, ssh_user, ssh_priv_path, script).unwrap_or_default();
+    let output = do_capture(cp_ip, ssh_user, ssh_priv_path, jump, script).unwrap_or_default();
 
     let stored_endpoint = output
         .split(':')
@@ -1447,15 +1554,6 @@ fn verify_control_plane_endpoint(
 // Control-plane-endpoint DNS guard
 // ---------------------------------------------------------------------------
 
-/// Verify that the hostname inside `cp_endpoint` resolves on a remote node.
-///
-/// * Skipped when `cp_endpoint` is already a bare IP address.
-/// * When the hostname is **unresolvable** the user is offered two choices:
-///   - Let maglev append a temporary `/etc/hosts` line right now.
-///   - Abort, with exact copy-paste instructions for a manual fix.
-///
-/// `capture` / `run` are thin closures over either the direct or the
-/// ProxyJump SSH helpers so the same logic works for every node type.
 fn ensure_cp_endpoint_resolves(
     node_name: &str,
     cp_endpoint: &str,
@@ -1465,7 +1563,6 @@ fn ensure_cp_endpoint_resolves(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host = cp_endpoint.split(':').next().unwrap_or(cp_endpoint);
 
-    // Nothing to do when the endpoint is already an IP address.
     if host.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
     }
@@ -1538,11 +1635,16 @@ fn ensure_cp_endpoint_resolves(
 // Cilium provisioning steps (Steps B + C)
 // ---------------------------------------------------------------------------
 
+/// Install and verify Cilium CNI on a control-plane node.
+///
+/// `jump` — when `Some((jump_ip, jump_user))` every SSH command is tunnelled
+/// through the specified ProxyJump host.  Pass `None` to connect directly.
 fn provision_cilium(
     cp_ip: &str,
     cp_name: &str,
     ssh_user: &str,
     ssh_priv_path: &str,
+    jump: Option<(&str, &str)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step B: cilium install ────────────────────────────────────────────────
     let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
@@ -1555,13 +1657,13 @@ fn provision_cilium(
         return Ok(());
     }
 
-    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd) {
+    match do_run(cp_ip, ssh_user, ssh_priv_path, jump, &cilium_install_cmd) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("  ⚠ cilium install failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_install_cmd}");
             println!("    $ {sudo_cmd}");
-            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+            do_run(cp_ip, ssh_user, ssh_priv_path, jump, &sudo_cmd)?;
         }
     }
     println!("\n  ✓ Cilium CNI installed.");
@@ -1577,13 +1679,13 @@ fn provision_cilium(
         return Ok(());
     }
 
-    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd) {
+    match do_run(cp_ip, ssh_user, ssh_priv_path, jump, &cilium_status_cmd) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("  ⚠ cilium status --wait failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_status_cmd}");
             println!("    $ {sudo_cmd}");
-            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+            do_run(cp_ip, ssh_user, ssh_priv_path, jump, &sudo_cmd)?;
         }
     }
     println!("\n  ✓ Cilium is ready.");
@@ -1609,9 +1711,7 @@ fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let resolved = resolve_rules(common)?;
 
-    // Collect all nodes (both control-plane and worker)
-    let mut all_nodes: Vec<(String, bool)> = Vec::new(); // (node_name, prefer_public)
-
+    let mut all_nodes: Vec<(String, bool)> = Vec::new();
     for rule in &resolved {
         let prefer_public = rule.merged.ip_address == IpAddressType::Public;
         for node in &rule.nodes {
@@ -1624,7 +1724,6 @@ fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Get SSH credentials from the first control-plane rule
     let first_cp_spec = resolved
         .iter()
         .find(|r| r.group_type == "control-plane")
@@ -1636,7 +1735,6 @@ fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let ssh_pub_path = first_cp_spec.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
-    // Fetch IPs
     println!("\n── Nodes to reset ───────────────────────────────────────────────────────");
     println!("Fetching IPs …\n");
 
@@ -1660,12 +1758,27 @@ fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let primary_cp_ip = nodes_with_ips
+    // ── Resolve jump host ─────────────────────────────────────────────────────
+    // For reset we derive the primary CP from the first public-IP node (or
+    // the very first node if none is public) so we can use it as the legacy
+    // fallback jump host when no explicit provisioner is configured.
+    let implicit_primary = nodes_with_ips
         .iter()
         .find(|(_, _, pp)| *pp)
-        .map(|(_, ip, _)| ip.clone())
-        .or_else(|| nodes_with_ips.first().map(|(_, ip, _)| ip.clone()))
+        .or_else(|| nodes_with_ips.first());
+
+    let (implicit_cp_name, implicit_cp_ip, implicit_cp_public) = implicit_primary
+        .map(|(n, ip, pp)| (n.as_str(), ip.as_str(), *pp))
         .ok_or("No nodes available")?;
+
+    let jump_host: Option<JumpHost> = resolve_jump_host(
+        common.provisioner.as_ref(),
+        implicit_cp_name,
+        implicit_cp_ip,
+        implicit_cp_public,
+        ssh_user,
+        provider,
+    )?;
 
     // Reset each node
     for (idx, (name, ip, prefer_public)) in nodes_with_ips.iter().enumerate() {
@@ -1676,26 +1789,15 @@ fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let needs_jump = !prefer_public && nodes_with_ips.iter().find(|(_, _, pp)| *pp).is_some();
+        let node_jump = jump_host
+            .as_ref()
+            .and_then(|jh| jh.for_node(name, *prefer_public));
 
         let reset_cmd = "sudo kubeadm reset -f && \
                         sudo rm -rf /etc/cni /etc/kubernetes /var/lib/etcd /var/lib/kubelet";
 
         println!("  Running kubeadm reset …");
-        let result = if needs_jump {
-            ssh_run_jump(
-                &primary_cp_ip,
-                ssh_user,
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                reset_cmd,
-            )
-        } else {
-            ssh_run(ip, ssh_user, &ssh_priv_path, reset_cmd)
-        };
-
-        match result {
+        match do_run(ip, ssh_user, &ssh_priv_path, node_jump, reset_cmd) {
             Ok(()) => println!("  ✓ {name} reset."),
             Err(e) => eprintln!("  ✗ Failed to reset {name}: {e}"),
         }
@@ -1722,9 +1824,7 @@ fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let resolved = resolve_rules(common)?;
 
-    // Collect all nodes (both control-plane and worker)
-    let mut all_nodes: Vec<(String, bool)> = Vec::new(); // (node_name, prefer_public)
-
+    let mut all_nodes: Vec<(String, bool)> = Vec::new();
     for rule in &resolved {
         let prefer_public = rule.merged.ip_address == IpAddressType::Public;
         for node in &rule.nodes {
@@ -1737,7 +1837,6 @@ fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Get SSH credentials from the first control-plane rule
     let first_cp_spec = resolved
         .iter()
         .find(|r| r.group_type == "control-plane")
@@ -1749,7 +1848,6 @@ fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let ssh_pub_path = first_cp_spec.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
-    // Fetch IPs
     println!("\n── Nodes to restart ─────────────────────────────────────────────────────");
     println!("Fetching IPs …\n");
 
@@ -1773,12 +1871,24 @@ fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let primary_cp_ip = nodes_with_ips
+    // ── Resolve jump host ─────────────────────────────────────────────────────
+    let implicit_primary = nodes_with_ips
         .iter()
         .find(|(_, _, pp)| *pp)
-        .map(|(_, ip, _)| ip.clone())
-        .or_else(|| nodes_with_ips.first().map(|(_, ip, _)| ip.clone()))
+        .or_else(|| nodes_with_ips.first());
+
+    let (implicit_cp_name, implicit_cp_ip, implicit_cp_public) = implicit_primary
+        .map(|(n, ip, pp)| (n.as_str(), ip.as_str(), *pp))
         .ok_or("No nodes available")?;
+
+    let jump_host: Option<JumpHost> = resolve_jump_host(
+        common.provisioner.as_ref(),
+        implicit_cp_name,
+        implicit_cp_ip,
+        implicit_cp_public,
+        ssh_user,
+        provider,
+    )?;
 
     // Restart each node
     for (idx, (name, ip, prefer_public)) in nodes_with_ips.iter().enumerate() {
@@ -1789,26 +1899,14 @@ fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let needs_jump = !prefer_public && nodes_with_ips.iter().find(|(_, _, pp)| *pp).is_some();
+        let node_jump = jump_host
+            .as_ref()
+            .and_then(|jh| jh.for_node(name, *prefer_public));
 
         println!("  Sending reboot signal …");
-        let result = if needs_jump {
-            ssh_run_jump(
-                &primary_cp_ip,
-                ssh_user,
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                "sudo reboot",
-            )
-        } else {
-            ssh_run(ip, ssh_user, &ssh_priv_path, "sudo reboot")
-        };
-
-        match result {
+        match do_run(ip, ssh_user, &ssh_priv_path, node_jump, "sudo reboot") {
             Ok(()) => println!("  ✓ {name} reboot initiated."),
             Err(e) => {
-                // Reboot may close connection immediately, so connection errors are acceptable
                 if e.to_string().contains("status") || e.to_string().contains("exited") {
                     println!("  ✓ {name} reboot initiated (connection closed).");
                 } else {

@@ -17,6 +17,21 @@ gcp:
     - maglev-worker-gamma
     - maglev-worker-delta
     - maglev-worker-epsilon
+
+  # The provisioner is the entry-point node used as a ProxyJump bastion for
+  # any node whose ip-address resolves to a private address.
+  #
+  #   type  — which IP type to dial when connecting TO the provisioner itself
+  #   node  — VM name of the bastion (must exist in one of the groups above)
+  #
+  # maglev-cp-alpha is in the "public" group (ip-address: public) so it is
+  # reachable directly from the operator's machine.  The two additional
+  # control-plane nodes and all workers carry private IPs and are reached
+  # through maglev-cp-alpha via ProxyJump.
+  provisioner:
+    type: public
+    node: maglev-cp-alpha
+
   specs:
   - name: cisak
     config:
@@ -44,6 +59,7 @@ gcp:
   - name: worker-nodes
     config:
     - boot-disk-size: 50
+
   rules:
   - group:
     - public
@@ -59,6 +75,7 @@ gcp:
     specs:
     - cisak
     - worker-nodes
+
   credentials:
     client-email: my-service-account@my-project.iam.gserviceaccount.com
     private-key: "path/to/private-key.pem"

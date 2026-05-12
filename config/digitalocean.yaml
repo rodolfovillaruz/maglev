@@ -14,6 +14,20 @@ digitalocean:
     - maglev-worker-gamma
     - maglev-worker-delta
     - maglev-worker-epsilon
+
+  # The provisioner is the entry-point node used as a ProxyJump bastion for
+  # any node whose ip-address resolves to a private address.
+  #
+  #   type  — which IP type to dial when connecting TO the provisioner itself
+  #   node  — VM name of the bastion (must exist in one of the groups above)
+  #
+  # DigitalOcean Droplets always receive a public IP, so "type: public" is
+  # the correct choice here.  The provisioner node (maglev-cp-alpha) is
+  # reached directly; all other private-IP nodes tunnel through it.
+  provisioner:
+    type: public
+    node: maglev-cp-alpha
+
   specs:
   - name: cisak
     config:
@@ -37,6 +51,7 @@ digitalocean:
   - name: secondary
     config:
     - boot-disk-size: 50
+
   rules:
   - group:
     - primary
@@ -48,6 +63,7 @@ digitalocean:
     specs:
     - cisak
     - secondary
+
   credentials:
     token: "your-digitalocean-api-token"
     region: nyc1
