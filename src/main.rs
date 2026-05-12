@@ -34,31 +34,26 @@ enum Commands {
     /// Create VM instances described by a provider YAML config
     Apply {
         /// Path to the YAML config file (gcp.yaml or digitalocean.yaml)
-        #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
     /// Permanently delete VM instances described by a provider YAML config
     Destroy {
         /// Path to the YAML config file
-        #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
     /// Provision Kubernetes on control-plane nodes and join workers
     Play {
         /// Path to the YAML config file
-        #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
     /// Reset kubeadm state on all nodes
     Reset {
         /// Path to the YAML config file
-        #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
     /// Restart (reboot) all nodes
     Restart {
         /// Path to the YAML config file
-        #[arg(default_value = "config/gcp.yaml")]
         config: String,
     },
     /// Run the interactive GCP credential builder
