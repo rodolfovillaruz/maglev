@@ -1541,7 +1541,15 @@ fn provision_cilium(
         return Ok(());
     }
 
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd)?;
+    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("  ⚠ cilium status --wait failed ({e}) — retrying with sudo …");
+            let sudo_cmd = format!("sudo {cilium_status_cmd}");
+            println!("    $ {sudo_cmd}");
+            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+        }
+    }
     println!("\n  ✓ Cilium is ready.");
 
     println!("\n  ✓ {cp_name} control-plane provisioning complete.");
