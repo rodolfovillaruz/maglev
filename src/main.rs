@@ -909,36 +909,7 @@ fn provision_control_plane_node(
     ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
     println!("\n  ✓ kubeadm init complete.");
 
-    // ── Step B: cilium install ────────────────────────────────────────────────
-    let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
-
-    println!("\n  → Step B: deploy Cilium CNI");
-    println!("    $ {cilium_install_cmd}");
-
-    if !prompt_yes_no("  Run cilium install?") {
-        println!("  Skipped — Cilium CNI will not be deployed.");
-        return Ok(());
-    }
-
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd)?;
-    println!("\n  ✓ Cilium CNI installed.");
-
-    // ── Step C: cilium status --wait ──────────────────────────────────────────
-    let cilium_status_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait");
-
-    println!("\n  → Step C: wait for Cilium to become ready");
-    println!("    $ {cilium_status_cmd}");
-
-    if !prompt_yes_no("  Run cilium status --wait?") {
-        println!("  Skipped — continuing without confirming Cilium health.");
-        return Ok(());
-    }
-
-    ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd)?;
-    println!("\n  ✓ Cilium is ready.");
-
-    println!("\n  ✓ {cp_name} control-plane provisioning complete.");
-    Ok(())
+    provision_cilium(cp_ip, cp_name, ssh_user, ssh_priv_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1084,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         if already_init.trim() == "yes" {
-            println!("  ✓ {primary_cp_name} already initialised — skipping.");
+            println!("  ✓ {primary_cp_name} already initialised — skipping kubeadm init.");
             if is_ha {
                 verify_control_plane_endpoint(
                     primary_cp_ip,
@@ -1123,6 +1094,7 @@ fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     &cp_endpoint,
                 )?;
             }
+            provision_cilium(primary_cp_ip, primary_cp_name, ssh_user, &ssh_priv_path)?;
         } else {
             provision_control_plane_node(
                 primary_cp_ip,
@@ -1523,5 +1495,55 @@ fn ensure_cp_endpoint_resolves(
         .into());
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cilium provisioning steps (Steps B + C)
+// ---------------------------------------------------------------------------
+
+fn provision_cilium(
+    cp_ip: &str,
+    cp_name: &str,
+    ssh_user: &str,
+    ssh_priv_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // ── Step B: cilium install ────────────────────────────────────────────────
+    let cilium_install_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} install");
+
+    println!("\n  → Step B: deploy Cilium CNI");
+    println!("    $ {cilium_install_cmd}");
+
+    if !prompt_yes_no("  Run cilium install?") {
+        println!("  Skipped — Cilium CNI will not be deployed.");
+        return Ok(());
+    }
+
+    match ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_install_cmd) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("  ⚠ cilium install failed ({e}) — retrying with sudo …");
+            let sudo_cmd = format!("sudo {cilium_install_cmd}");
+            println!("    $ {sudo_cmd}");
+            ssh_run(cp_ip, ssh_user, ssh_priv_path, &sudo_cmd)?;
+        }
+    }
+    println!("\n  ✓ Cilium CNI installed.");
+
+    // ── Step C: cilium status --wait ──────────────────────────────────────────
+    let cilium_status_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait");
+
+    println!("\n  → Step C: wait for Cilium to become ready");
+    println!("    $ {cilium_status_cmd}");
+
+    if !prompt_yes_no("  Run cilium status --wait?") {
+        println!("  Skipped — continuing without confirming Cilium health.");
+        return Ok(());
+    }
+
+    ssh_run(cp_ip, ssh_user, ssh_priv_path, &cilium_status_cmd)?;
+    println!("\n  ✓ Cilium is ready.");
+
+    println!("\n  ✓ {cp_name} control-plane provisioning complete.");
     Ok(())
 }
