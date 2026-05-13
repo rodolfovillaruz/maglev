@@ -281,19 +281,34 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             BASE=$(sudo kubeadm token create --print-join-command) && \
             echo \"$BASE --control-plane --certificate-key $CERT_KEY\"";
 
-        let cp_join_cmd = match ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cp_join_script)
-        {
-            Ok(cmd) if !cmd.is_empty() => cmd,
-            Ok(_) => {
-                eprintln!(
-                    "  ✗ Empty control-plane join command from {primary_cp_name} \
+        let cp_join_cmd = {
+            // Fetch join command from primary CP using appropriate routing
+            let cmd_result = if any_worker_needs_jump {
+                ssh_capture_jump(
+                    &jumphost_ip,
+                    ssh_user,
+                    primary_cp_ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    cp_join_script,
+                )
+            } else {
+                ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cp_join_script)
+            };
+
+            match cmd_result {
+                Ok(cmd) if !cmd.is_empty() => cmd,
+                Ok(_) => {
+                    eprintln!(
+                        "  ✗ Empty control-plane join command from {primary_cp_name} \
                      — is it fully up?"
-                );
-                String::new()
-            }
-            Err(e) => {
-                eprintln!("  ✗ Could not fetch control-plane join command: {e}");
-                String::new()
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    eprintln!("  ✗ Could not fetch control-plane join command: {e}");
+                    String::new()
+                }
             }
         };
 
@@ -311,28 +326,58 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                 continue;
             }
 
-            // Additional CP nodes that have private IPs are assumed to be
-            // reachable directly (VPN / internal routing).  If they are not,
-            // the operator will see an SSH timeout here.
-            let _ = prefer_public; // used only to choose ip — already reflected in `ip`
+            // Determine if this CP node needs jumphost routing
+            let cp_needs_jump = !prefer_public && jumphost_is_public;
+
+            if cp_needs_jump {
+                println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
+            }
+
+            // DNS guard — validate control-plane endpoint is resolvable on this node
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                primary_cp_ip,
-                |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
-            )?;
-
-            let already_joined = ssh_capture(
                 ip,
-                ssh_user,
-                &ssh_priv_path,
-                "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+                |cmd| match cp_needs_jump {
+                    true => {
+                        ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd)
+                    }
+                    false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+                },
+                |cmd| match cp_needs_jump {
+                    true => ssh_run_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                    false => ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+                },
             )?;
 
-            if already_joined.trim() == "yes" {
-                println!("  ✓ {name} already part of the control-plane — skipping.");
-                continue;
+            let already_joined = if cp_needs_jump {
+                ssh_capture_jump(
+                    &jumphost_ip,
+                    ssh_user,
+                    ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+                )
+            } else {
+                ssh_capture(
+                    ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+                )
+            };
+
+            match already_joined {
+                Ok(ref s) if s.trim() == "yes" => {
+                    println!("  ✓ {name} already part of the control-plane — skipping.");
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("  ✗ Could not check join status on {name}: {e}");
+                    continue;
+                }
+                _ => {}
             }
 
             if cp_join_cmd.is_empty() {
@@ -343,8 +388,24 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             println!("  Join command: {cp_join_cmd}");
             if prompt_yes_no("  Run join command?") {
                 println!("\n  Joining {name} as control-plane node …\n");
-                ssh_run(ip, ssh_user, &ssh_priv_path, &format!("sudo {cp_join_cmd}"))?;
-                println!("\n  ✓ {name} joined as control-plane.");
+                let join_full = format!("sudo {cp_join_cmd}");
+                let result = if cp_needs_jump {
+                    ssh_run_jump(
+                        &jumphost_ip,
+                        ssh_user,
+                        ip,
+                        ssh_user,
+                        &ssh_priv_path,
+                        &join_full,
+                    )
+                } else {
+                    ssh_run(ip, ssh_user, &ssh_priv_path, &join_full)
+                };
+
+                match result {
+                    Ok(()) => println!("\n  ✓ {name} joined as control-plane."),
+                    Err(e) => eprintln!("\n  ✗ Failed to join {name}: {e}"),
+                }
             } else {
                 println!("  Skipped.");
             }
@@ -360,20 +421,36 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         worker_with_ips.len()
     );
 
-    let worker_join_cmd = match ssh_capture(
-        primary_cp_ip,
-        ssh_user,
-        &ssh_priv_path,
-        "sudo kubeadm token create --print-join-command",
-    ) {
-        Ok(cmd) if !cmd.is_empty() => cmd,
-        Ok(_) => {
-            eprintln!("  ✗ Empty worker join command from {primary_cp_name} — is it fully up?");
-            String::new()
-        }
-        Err(e) => {
-            eprintln!("  ✗ Could not fetch worker join command: {e}");
-            String::new()
+    let worker_join_cmd = {
+        // Fetch join command from primary CP using appropriate routing
+        let cmd_result = if any_worker_needs_jump {
+            ssh_capture_jump(
+                &jumphost_ip,
+                ssh_user,
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                "sudo kubeadm token create --print-join-command",
+            )
+        } else {
+            ssh_capture(
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                "sudo kubeadm token create --print-join-command",
+            )
+        };
+
+        match cmd_result {
+            Ok(cmd) if !cmd.is_empty() => cmd,
+            Ok(_) => {
+                eprintln!("  ✗ Empty worker join command from {primary_cp_name} — is it fully up?");
+                String::new()
+            }
+            Err(e) => {
+                eprintln!("  ✗ Could not fetch worker join command: {e}");
+                String::new()
+            }
         }
     };
 
@@ -383,11 +460,11 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         .zip(worker_entries.iter())
         .enumerate()
     {
-        let needs_jump = !prefer_public && jumphost_is_public;
+        let worker_needs_jump = !prefer_public && jumphost_is_public;
 
         println!("\n  [{}/{}] {name}  ({ip})", idx + 1, worker_with_ips.len());
 
-        if needs_jump {
+        if worker_needs_jump {
             println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
         }
 
@@ -396,24 +473,20 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             continue;
         }
 
-        // DNS guard — use the appropriate SSH path per worker topology
-        if needs_jump {
-            ensure_cp_endpoint_resolves(
-                name,
-                &cp_endpoint,
-                &jumphost_ip,
-                |cmd| ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
-            )?;
-        } else {
-            ensure_cp_endpoint_resolves(
-                name,
-                &cp_endpoint,
-                primary_cp_ip,
-                |cmd| ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
-                |cmd| ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
-            )?;
-        }
+        // DNS guard — validate control-plane endpoint is resolvable on this worker node
+        ensure_cp_endpoint_resolves(
+            name,
+            &cp_endpoint,
+            ip,
+            |cmd| match worker_needs_jump {
+                true => ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+            },
+            |cmd| match worker_needs_jump {
+                true => ssh_run_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                false => ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+            },
+        )?;
 
         if worker_join_cmd.is_empty() {
             eprintln!("  ✗ No join command available — skipping {name}.");
@@ -422,9 +495,9 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
 
         println!("  Join command: {worker_join_cmd}");
 
-        let already_joined = if needs_jump {
+        let already_joined = if worker_needs_jump {
             ssh_capture_jump(
-                primary_cp_ip,
+                &jumphost_ip,
                 ssh_user,
                 ip,
                 ssh_user,
@@ -445,15 +518,18 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                 println!("  ✓ {name} already has kubelet active — skipping.");
                 continue;
             }
+            Err(e) => {
+                eprintln!("  ⚠ Could not check kubelet status on {name}: {e}");
+            }
             _ => {}
         }
 
         println!("\n  Joining {name} …\n");
         let join_full = format!("sudo {worker_join_cmd}");
 
-        let result = if needs_jump {
+        let result = if worker_needs_jump {
             ssh_run_jump(
-                primary_cp_ip,
+                &jumphost_ip,
                 ssh_user,
                 ip,
                 ssh_user,
