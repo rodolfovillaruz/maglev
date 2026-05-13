@@ -16,7 +16,20 @@ use crate::ssh_run_jump;
 // `play` subcommand
 // ---------------------------------------------------------------------------
 
-pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn play_config(
+    config_path: &str,
+    auto_approve: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // When --auto-approve is set every interactive gate is bypassed.
+    let confirm = |question: &str| -> bool {
+        if auto_approve {
+            println!("{question} [auto-approved]");
+            true
+        } else {
+            prompt_yes_no(question)
+        }
+    };
+
     println!("=== Maglev Play ===\n");
     println!("Reading config: {config_path}");
 
@@ -168,7 +181,7 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     println!("\n━━ Step 1 / 3 — Primary control-plane init ({primary_cp_name}) ━━━━━━━━━━━━");
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
 
-    if prompt_yes_no(&format!("  SSH-check and provision {primary_cp_name}?")) {
+    if confirm(&format!("  SSH-check and provision {primary_cp_name}?")) {
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
@@ -305,7 +318,7 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         {
             println!("\n  [{}/{}] {name}  ({ip})", idx + 2, cp_with_ips.len());
 
-            if !prompt_yes_no(&format!("  Check and join {name} as control-plane?")) {
+            if !confirm(&format!("  Check and join {name} as control-plane?")) {
                 println!("  Skipped.");
                 continue;
             }
@@ -368,7 +381,7 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             }
 
             println!("  Join command: {cp_join_cmd}");
-            if prompt_yes_no("  Run join command?") {
+            if confirm("  Run join command?") {
                 println!("\n  Joining {name} as control-plane node …\n");
                 let join_full = format!("sudo {cp_join_cmd}");
                 let result = if cp_needs_jump {
@@ -403,12 +416,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         worker_with_ips.len()
     );
 
-    // Fetch the cluster CA fingerprint once from the primary CP.
-    //
-    // Every successfully joined worker stores the cluster CA inside its
-    // kubelet.conf.  Comparing fingerprints lets us detect nodes that are
-    // already joined to a *different* cluster and refuse to touch them rather
-    // than silently re-joining (and potentially corrupting the node).
     let primary_ca_fingerprint: Option<String> = {
         let cmd = "sudo openssl x509 -noout -fingerprint -sha256 \
                    -in /etc/kubernetes/pki/ca.crt 2>/dev/null \
@@ -493,17 +500,11 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
         }
 
-        if !prompt_yes_no("  Check and join?") {
+        if !confirm("  Check and join?") {
             println!("  Skipped.");
             continue;
         }
 
-        // ── Idempotency check ─────────────────────────────────────────────────
-        //
-        // /etc/kubernetes/kubelet.conf is written by `kubeadm join` only after
-        // a *successful* join.  Checking for its existence is therefore more
-        // reliable than asking whether kubelet is active, which can be true
-        // even after a partial or failed join attempt.
         let join_check_cmd =
             "test -f /etc/kubernetes/kubelet.conf && echo joined || echo not-joined";
 
@@ -521,96 +522,78 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         };
 
         match join_status {
-            // kubelet.conf found — node was previously joined.
-            Ok(ref s) if s.trim() == "joined" => {
-                match &primary_ca_fingerprint {
-                    Some(expected_fp) => {
-                        // Extract the CA certificate that was embedded into
-                        // kubelet.conf at join time and compute its fingerprint.
-                        // kubeadm always inlines the CA as a base64-encoded DER
-                        // blob under `certificate-authority-data`, so we can
-                        // pull it with awk, decode it, and feed it to openssl.
-                        let worker_fp_cmd = "sudo awk '/certificate-authority-data/{print $2; exit}' \
+            Ok(ref s) if s.trim() == "joined" => match &primary_ca_fingerprint {
+                Some(expected_fp) => {
+                    let worker_fp_cmd = "sudo awk '/certificate-authority-data/{print $2; exit}' \
                              /etc/kubernetes/kubelet.conf \
                              | base64 -d \
                              | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
                              | cut -d= -f2";
 
-                        let worker_fp = if worker_needs_jump {
-                            ssh_capture_jump(
-                                &jumphost_ip,
-                                ssh_user,
-                                ip,
-                                ssh_user,
-                                &ssh_priv_path,
-                                worker_fp_cmd,
-                            )
-                        } else {
-                            ssh_capture(ip, ssh_user, &ssh_priv_path, worker_fp_cmd)
-                        };
+                    let worker_fp = if worker_needs_jump {
+                        ssh_capture_jump(
+                            &jumphost_ip,
+                            ssh_user,
+                            ip,
+                            ssh_user,
+                            &ssh_priv_path,
+                            worker_fp_cmd,
+                        )
+                    } else {
+                        ssh_capture(ip, ssh_user, &ssh_priv_path, worker_fp_cmd)
+                    };
 
-                        match worker_fp {
-                            // ✓ Same CA — node is already part of this cluster.
-                            Ok(ref fp) if fp.trim() == expected_fp.as_str() => {
-                                println!(
-                                    "  ✓ {name} already joined to this cluster \
+                    match worker_fp {
+                        Ok(ref fp) if fp.trim() == expected_fp.as_str() => {
+                            println!(
+                                "  ✓ {name} already joined to this cluster \
                                      (CA fingerprint verified) — skipping."
-                                );
-                                continue;
-                            }
-                            // ✗ Different CA — node belongs to a foreign cluster.
-                            // Refusing to re-join protects both the node and the
-                            // existing cluster from accidental data loss.
-                            Ok(ref fp) if !fp.trim().is_empty() => {
-                                eprintln!(
-                                    "  ✗ {name} is joined to a DIFFERENT cluster!\n\
+                            );
+                            continue;
+                        }
+                        Ok(ref fp) if !fp.trim().is_empty() => {
+                            eprintln!(
+                                "  ✗ {name} is joined to a DIFFERENT cluster!\n\
                                      Expected CA fingerprint : {expected_fp}\n\
                                      Node CA fingerprint     : {}\n\
                                      Refusing to re-join — manual intervention required \
                                      (reset the node with `sudo kubeadm reset` first).",
-                                    fp.trim()
-                                );
-                                continue;
-                            }
-                            // Could not read the fingerprint — play it safe.
-                            Ok(_) => {
-                                eprintln!(
-                                    "  ⚠  {name} has kubelet.conf but the CA fingerprint \
+                                fp.trim()
+                            );
+                            continue;
+                        }
+                        Ok(_) => {
+                            eprintln!(
+                                "  ⚠  {name} has kubelet.conf but the CA fingerprint \
                                      could not be extracted — skipping to avoid \
                                      overwriting an existing cluster member."
-                                );
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "  ⚠  {name} has kubelet.conf but CA fingerprint \
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  ⚠  {name} has kubelet.conf but CA fingerprint \
                                      verification failed ({e}) — skipping to avoid \
                                      overwriting an existing cluster member."
-                                );
-                                continue;
-                            }
+                            );
+                            continue;
                         }
                     }
-                    // CA fingerprint unavailable (primary CP unreachable earlier).
-                    // Still skip — it is safer to do nothing than to blindly re-join.
-                    None => {
-                        println!(
-                            "  ✓ {name} already has kubelet.conf — skipping \
-                             (CA fingerprint verification unavailable)."
-                        );
-                        continue;
-                    }
                 }
-            }
-            // SSH / command error — warn but continue so the operator can decide.
+                None => {
+                    println!(
+                        "  ✓ {name} already has kubelet.conf — skipping \
+                             (CA fingerprint verification unavailable)."
+                    );
+                    continue;
+                }
+            },
             Err(e) => {
                 eprintln!("  ⚠  Could not check join status on {name}: {e}");
             }
-            // "not-joined" — fall through to the join logic below.
             _ => {}
         }
 
-        // ── DNS guard ─────────────────────────────────────────────────────────
         ensure_cp_endpoint_resolves(
             name,
             &cp_endpoint,
@@ -656,7 +639,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     println!("\n✓ Cluster provisioning complete!");
     println!("\n  Verify from the primary control-plane:");
 
-    // Try to fetch both IP addresses for display
     let alt_ip = if primary_cp_prefer_public {
         provider.get_vm_ip(primary_cp_name, false).ok()
     } else {

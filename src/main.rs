@@ -53,6 +53,9 @@ enum Commands {
     Play {
         /// Path to the YAML config file
         config: String,
+        /// Assume "yes" to every interactive prompt
+        #[arg(long, default_value_t = false)]
+        auto_approve: bool,
     },
     /// Reset kubeadm state on all nodes
     Reset {
@@ -212,7 +215,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Apply { config } => apply_config(&config),
         Commands::Destroy { config } => destroy_config(&config),
-        Commands::Play { config } => play_config(&config),
+        Commands::Play {
+            config,
+            auto_approve,
+        } => play_config(&config, auto_approve),
         Commands::Reset { config } => reset_config(&config),
         Commands::Restart { config } => restart_config(&config),
         Commands::Print => print_build_credential(),
