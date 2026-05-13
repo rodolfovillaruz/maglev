@@ -333,11 +333,12 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                 println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
             }
 
-            // DNS guard — validate control-plane endpoint is resolvable on this node
+            // DNS guard — all non-primary CP nodes must resolve the endpoint to
+            // the primary CP's IP, which is the north star for the cluster.
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                ip,
+                primary_cp_ip,
                 |cmd| match cp_needs_jump {
                     true => {
                         ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd)
@@ -473,11 +474,12 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             continue;
         }
 
-        // DNS guard — validate control-plane endpoint is resolvable on this worker node
+        // DNS guard — workers must resolve the control-plane endpoint to the
+        // primary CP's IP, which is the single north star for the cluster.
         ensure_cp_endpoint_resolves(
             name,
             &cp_endpoint,
-            ip,
+            primary_cp_ip,
             |cmd| match worker_needs_jump {
                 true => ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
                 false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
