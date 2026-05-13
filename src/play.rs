@@ -655,8 +655,38 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
 
     println!("\n✓ Cluster provisioning complete!");
     println!("\n  Verify from the primary control-plane:");
-    println!("    ssh -i {ssh_priv_path} {ssh_user}@{primary_cp_ip}");
-    println!("    kubectl get nodes -o wide");
+
+    // Try to fetch both IP addresses for display
+    let alt_ip = if primary_cp_prefer_public {
+        provider.get_vm_ip(primary_cp_name, false).ok()
+    } else {
+        provider.get_vm_ip(primary_cp_name, true).ok()
+    };
+
+    let (primary_label, primary_ip_to_show, alt_label, alt_ip_to_show) = if primary_cp_prefer_public
+    {
+        (
+            "public",
+            primary_cp_ip.clone(),
+            "private",
+            alt_ip.unwrap_or_else(|| "<private-ip>".to_string()),
+        )
+    } else {
+        (
+            "private",
+            primary_cp_ip.clone(),
+            "public",
+            alt_ip.unwrap_or_else(|| "<public-ip>".to_string()),
+        )
+    };
+
+    println!("\n  Using {primary_label} IP:");
+    println!("    ssh -i {ssh_priv_path} {ssh_user}@{primary_ip_to_show}");
+    println!("    sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get po -A -o wide");
+
+    println!("\n  Using {alt_label} IP:");
+    println!("    ssh -i {ssh_priv_path} {ssh_user}@{alt_ip_to_show}");
+    println!("    sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get po -A -o wide");
 
     Ok(())
 }
