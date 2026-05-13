@@ -216,64 +216,118 @@ pub fn ensure_cp_endpoint_resolves(
 
     println!("  Checking if '{host}' resolves on {node_name} …");
 
-    let result = capture(&format!(
-        "getent hosts {host} >/dev/null 2>&1 && echo ok || echo fail"
-    ))?;
+    // Try to resolve the hostname and capture the resolved IP
+    let resolve_cmd = format!("getent hosts {host} 2>/dev/null | awk '{{ print $1 }}' || echo ''");
+    let resolved_ip = capture(&resolve_cmd)?.trim().to_string();
 
-    if result.trim() == "ok" {
-        println!("  ✓ '{host}' resolves.");
-        return Ok(());
-    }
+    if !resolved_ip.is_empty() {
+        // Hostname already resolves to something
+        if resolved_ip == fallback_ip {
+            // Already resolves to the expected IP — nothing to do
+            println!("  ✓ '{host}' resolves to {resolved_ip}.");
+            return Ok(());
+        } else {
+            // Resolves but to wrong IP — need to update
+            eprintln!(
+                "\n  ⚠  '{host}' currently resolves to {resolved_ip} on {node_name},\n\
+                 but it should resolve to {fallback_ip}.\n\
+                 \n\
+                 kubeadm will fail or connect to the wrong endpoint.\n\
+                 \n\
+                 maglev will update /etc/hosts to fix this."
+            );
 
-    eprintln!(
-        "\n  ⚠  '{host}' does NOT resolve on {node_name}.\n\
-         \n\
-         kubeadm will fail unless the name is resolvable before it starts.\n\
-         \n\
-         Long-term fix: provision a load-balancer, point DNS '{host}' at it,\n\
-         then remove the /etc/hosts workaround from every node.\n\
-         \n\
-         Short-term: maglev can add  {fallback_ip}  {host}\n\
-         to /etc/hosts on this node right now (idempotent — skipped if already present)."
-    );
-
-    if prompt_yes_no(&format!(
-        "  Add '{fallback_ip}  {host}' to /etc/hosts on {node_name}?"
-    )) {
-        run(&format!(
-            "grep -qF '{host}' /etc/hosts \
-             || echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
-        ))?;
-        println!(
-            "  ✓ Added '{fallback_ip}  {host}' to /etc/hosts on {node_name}.\n\
-             \n\
-             ℹ  This is a temporary placeholder pointing at the primary control-plane IP.\n\
-             ℹ  Once your load-balancer is live, run on EVERY node:\n\
-             \n\
-             \t  sudo sed -i '/{host}/d' /etc/hosts\n\
-             \n\
-             ℹ  Then ensure DNS resolves '{host}' to the LB address."
-        );
+            if prompt_yes_no(&format!(
+                "  Update '{host}' in /etc/hosts to {fallback_ip} on {node_name}?"
+            )) {
+                // Remove old entry and add new one
+                run(&format!(
+                    "sudo sed -i '/[[:space:]]{host}[[:space:]]*$/d' /etc/hosts && \
+                     echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
+                ))?;
+                println!(
+                    "  ✓ Updated '{host}' in /etc/hosts to {fallback_ip} on {node_name}.\n\
+                     \n\
+                     ℹ  This is a temporary placeholder pointing at the primary control-plane IP.\n\
+                     ℹ  Once your load-balancer is live, run on EVERY node:\n\
+                     \n\
+                     \t  sudo sed -i '/{host}/d' /etc/hosts\n\
+                     \n\
+                     ℹ  Then ensure DNS resolves '{host}' to the LB address."
+                );
+                return Ok(());
+            } else {
+                return Err(format!(
+                    "DNS resolution mismatch for '{host}'.\n\
+                     \n\
+                     Currently resolves to: {resolved_ip}\n\
+                     Expected to resolve to: {fallback_ip}\n\
+                     \n\
+                     Update the entry in /etc/hosts on EVERY cluster node\n\
+                     (all control-plane + worker nodes) before re-running 'maglev play':\n\
+                     \n\
+                     \tsudo sed -i '/[[:space:]]{host}[[:space:]]*$/d' /etc/hosts && \
+                     echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts\n\
+                     \n\
+                     Once a real load-balancer is provisioned, update the entry to point\n\
+                     to the LB address, or delete it and let DNS handle resolution:\n\
+                     \n\
+                     \tsudo sed -i '/{host}/d' /etc/hosts"
+                )
+                .into());
+            }
+        }
     } else {
-        return Err(format!(
-            "DNS resolution for '{host}' is required before kubeadm can run.\n\
+        // Hostname doesn't resolve at all
+        eprintln!(
+            "\n  ⚠  '{host}' does NOT resolve on {node_name}.\n\
              \n\
-             Add the following line to /etc/hosts on EVERY cluster node\n\
-             (all control-plane + worker nodes) before re-running 'maglev play':\n\
+             kubeadm will fail unless the name is resolvable before it starts.\n\
              \n\
-             \t{fallback_ip}  {host}\n\
+             Long-term fix: provision a load-balancer, point DNS '{host}' at it,\n\
+             then remove the /etc/hosts workaround from every node.\n\
              \n\
-             Example (run on each node):\n\
-             \n\
-             \techo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts\n\
-             \n\
-             Once a real load-balancer is provisioned, update the entry to point\n\
-             to the LB address, or delete it and let DNS handle resolution:\n\
-             \n\
-             \tsudo sed -i '/{host}/d' /etc/hosts"
-        )
-        .into());
-    }
+             Short-term: maglev can add  {fallback_ip}  {host}\n\
+             to /etc/hosts on this node right now (idempotent — skipped if already present)."
+        );
 
-    Ok(())
+        if prompt_yes_no(&format!(
+            "  Add '{fallback_ip}  {host}' to /etc/hosts on {node_name}?"
+        )) {
+            run(&format!(
+                "grep -qF '{host}' /etc/hosts \
+                 || echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
+            ))?;
+            println!(
+                "  ✓ Added '{fallback_ip}  {host}' to /etc/hosts on {node_name}.\n\
+                 \n\
+                 ℹ  This is a temporary placeholder pointing at the primary control-plane IP.\n\
+                 ℹ  Once your load-balancer is live, run on EVERY node:\n\
+                 \n\
+                 \t  sudo sed -i '/{host}/d' /etc/hosts\n\
+                 \n\
+                 ℹ  Then ensure DNS resolves '{host}' to the LB address."
+            );
+            return Ok(());
+        } else {
+            return Err(format!(
+                "DNS resolution for '{host}' is required before kubeadm can run.\n\
+                 \n\
+                 Add the following line to /etc/hosts on EVERY cluster node\n\
+                 (all control-plane + worker nodes) before re-running 'maglev play':\n\
+                 \n\
+                 \t{fallback_ip}  {host}\n\
+                 \n\
+                 Example (run on each node):\n\
+                 \n\
+                 \techo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts\n\
+                 \n\
+                 Once a real load-balancer is provisioned, update the entry to point\n\
+                 to the LB address, or delete it and let DNS handle resolution:\n\
+                 \n\
+                 \tsudo sed -i '/{host}/d' /etc/hosts"
+            )
+            .into());
+        }
+    }
 }
