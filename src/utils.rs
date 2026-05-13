@@ -1,4 +1,6 @@
 use crate::SpecYaml;
+use crate::cp::ADMIN_KUBECONFIG;
+use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 use std::env;
 use std::fs::read_to_string;
 use std::io::{BufRead, Write, stdin, stdout};
@@ -109,5 +111,123 @@ pub fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Erro
             println!("  spec '{}' [{}]: ip-address = {}", spec.name, i, ip_str);
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Pending CSR approval helper
+// ---------------------------------------------------------------------------
+
+/// List every CSR whose final column is `Pending`, print an aggregated
+/// summary, and offer the operator a single prompt to approve them all.
+///
+/// Uses `$NF` (last field) so the check is stable regardless of whether the
+/// optional *REQUESTEDNAME* column is populated in the `kubectl get csr`
+/// output.
+pub fn approve_pending_csrs(
+    cp_ip: &str,
+    ssh_user: &str,
+    ssh_priv_path: &str,
+    any_worker_needs_jump: bool,
+    jumphost_ip: &str,
+    auto_approve: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // When --auto-approve is set every interactive gate is bypassed.
+    let confirm = |question: &str| -> bool {
+        if auto_approve {
+            println!("{question} [auto-approved]");
+            true
+        } else {
+            prompt_yes_no(question)
+        }
+    };
+
+    println!("\n  → Step B.5: approve pending kubelet-serving CSRs");
+
+    // Collect the names of every CSR currently in Pending state.
+    let list_cmd = format!(
+        "kubectl --kubeconfig {ADMIN_KUBECONFIG} get csr --no-headers 2>/dev/null \
+         | awk '$NF == \"Pending\" {{print $1}}'"
+    );
+
+    let raw = if any_worker_needs_jump {
+        ssh_capture_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            &list_cmd,
+        )
+        .unwrap_or_default()
+    } else {
+        ssh_capture(cp_ip, ssh_user, ssh_priv_path, &list_cmd).unwrap_or_default()
+    };
+
+    let pending: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if pending.is_empty() {
+        println!("  No pending CSRs found — skipping.");
+        return Ok(());
+    }
+
+    println!(
+        "\n  Found {} pending CSR(s) waiting for approval:\n",
+        pending.len()
+    );
+    for name in &pending {
+        println!("    • {name}");
+    }
+    println!();
+
+    if !confirm(&format!(
+        "  Approve all {} pending CSR(s) now?",
+        pending.len()
+    )) {
+        println!(
+            "  Skipped — CSRs remain pending.\n\
+             \n\
+             ℹ  You can approve them later with:\n\
+             \n\
+             \t  kubectl --kubeconfig {ADMIN_KUBECONFIG} get csr \\\n\
+             \t    --no-headers | awk '$NF == \"Pending\" {{print $1}}' \\\n\
+             \t    | xargs -r kubectl --kubeconfig {ADMIN_KUBECONFIG} certificate approve"
+        );
+        return Ok(());
+    }
+
+    // Build a single `certificate approve` call with all names on one line
+    // to avoid spawning one SSH session per CSR.
+    let approve_cmd = format!(
+        "kubectl --kubeconfig {ADMIN_KUBECONFIG} certificate approve {}",
+        pending.join(" ")
+    );
+    println!("    $ {approve_cmd}");
+
+    let result = if any_worker_needs_jump {
+        ssh_run_jump(
+            jumphost_ip,
+            ssh_user,
+            cp_ip,
+            ssh_user,
+            ssh_priv_path,
+            &approve_cmd,
+        )
+    } else {
+        ssh_run(cp_ip, ssh_user, ssh_priv_path, &approve_cmd)
+    };
+
+    match result {
+        Ok(()) => println!("  ✓ All {} pending CSR(s) approved.", pending.len()),
+        Err(e) => eprintln!(
+            "  ⚠ Failed to approve CSRs ({e}).\n\
+             Cilium may still become healthy — continuing."
+        ),
+    }
+
     Ok(())
 }

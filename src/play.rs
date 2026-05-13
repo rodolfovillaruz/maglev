@@ -7,10 +7,8 @@ use crate::provider::load_provider;
 use crate::provision_control_plane_node;
 use crate::rule::resolve_rules;
 use crate::spec::MergedSpec;
-use crate::ssh_capture;
-use crate::ssh_capture_jump;
-use crate::ssh_run;
-use crate::ssh_run_jump;
+use crate::utils::approve_pending_csrs;
+use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 
 // ---------------------------------------------------------------------------
 // `play` subcommand
@@ -637,6 +635,18 @@ pub fn play_config(
             Err(e) => eprintln!("  ✗ Failed to join {name}: {e}"),
         }
     }
+
+    // ── Final step — Approve any pending CSRs from worker nodes ────────────────
+    println!("\n━━ Final step — Approve pending CSRs from worker nodes ━━━━━━━━━━━━━━━━━━");
+
+    approve_pending_csrs(
+        primary_cp_ip,
+        ssh_user,
+        &ssh_priv_path,
+        any_worker_needs_jump,
+        &jumphost_ip,
+        auto_approve,
+    )?;
 
     println!("\n✓ Cluster provisioning complete!");
     println!("\n  Verify from the primary control-plane:");
