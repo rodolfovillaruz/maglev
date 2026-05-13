@@ -29,13 +29,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
 
     let resolved = resolve_rules(common)?;
 
-    // ── Partition resolved rules into CP and worker node lists ────────────────
-    //
-    // Each entry carries:  (node_name, prefer_public)
-    // The SSH config (user, key, control-plane-endpoint) is taken from the
-    // first control-plane rule's merged spec — all rules in the example share
-    // the same `cisak` base spec so these values are identical across the
-    // cluster.
     let mut cp_entries: Vec<(String, bool)> = Vec::new();
     let mut worker_entries: Vec<(String, bool)> = Vec::new();
     let mut first_cp_merged: Option<&MergedSpec> = None;
@@ -68,7 +61,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     let ssh_pub_path = first_cp_merged.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
-    // ── Cluster-size checks ───────────────────────────────────────────────────
     let cp_count = cp_entries.len();
     if cp_count == 0 {
         return Err("No control-plane nodes found in config.".into());
@@ -87,11 +79,8 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let is_ha = cp_count >= 3;
-
-    // Primary CP node is the first one in document order.
     let primary_cp_prefer_public = cp_entries[0].1;
 
-    // ── Resolve IPs and determine jumphost ────────────────────────────────────
     println!("\n  Fetching IPs …");
 
     let cp_with_ips: Vec<(String, String)> = cp_entries
@@ -124,7 +113,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         .first()
         .ok_or("No control-plane nodes available")?;
 
-    // Determine jumphost: use provisioner if configured, otherwise use primary CP
     let (jumphost_name, jumphost_ip, jumphost_is_public) = if let Some(p) = &common.provisioner {
         println!(
             "\n  Provisioner node configured: {} ({})",
@@ -142,7 +130,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         )
     };
 
-    // Determine if any worker needs jumphost routing
     let any_worker_needs_jump = worker_entries.iter().any(|(_, pp)| !pp) && jumphost_is_public;
 
     if any_worker_needs_jump {
@@ -152,7 +139,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         );
     }
 
-    // ── Determine the stable control-plane endpoint ───────────────────────────
     let cp_endpoint: String = match &first_cp_merged.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
             let ep = ep.trim().to_string();
@@ -282,7 +268,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             echo \"$BASE --control-plane --certificate-key $CERT_KEY\"";
 
         let cp_join_cmd = {
-            // Fetch join command from primary CP using appropriate routing
             let cmd_result = if any_worker_needs_jump {
                 ssh_capture_jump(
                     &jumphost_ip,
@@ -312,7 +297,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             }
         };
 
-        // cp_entries[1..] parallel-tracks cp_with_ips[1..]
         for (idx, ((name, ip), (_, prefer_public))) in cp_with_ips
             .iter()
             .skip(1)
@@ -326,15 +310,12 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
                 continue;
             }
 
-            // Determine if this CP node needs jumphost routing
             let cp_needs_jump = !prefer_public && jumphost_is_public;
 
             if cp_needs_jump {
                 println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
             }
 
-            // DNS guard — all non-primary CP nodes must resolve the endpoint to
-            // the primary CP's IP, which is the north star for the cluster.
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
@@ -422,8 +403,52 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         worker_with_ips.len()
     );
 
+    // Fetch the cluster CA fingerprint once from the primary CP.
+    //
+    // Every successfully joined worker stores the cluster CA inside its
+    // kubelet.conf.  Comparing fingerprints lets us detect nodes that are
+    // already joined to a *different* cluster and refuse to touch them rather
+    // than silently re-joining (and potentially corrupting the node).
+    let primary_ca_fingerprint: Option<String> = {
+        let cmd = "sudo openssl x509 -noout -fingerprint -sha256 \
+                   -in /etc/kubernetes/pki/ca.crt 2>/dev/null \
+                   | cut -d= -f2";
+        let result = if any_worker_needs_jump {
+            ssh_capture_jump(
+                &jumphost_ip,
+                ssh_user,
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                cmd,
+            )
+        } else {
+            ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd)
+        };
+        match result {
+            Ok(fp) if !fp.trim().is_empty() => {
+                let fp = fp.trim().to_string();
+                println!("  Cluster CA fingerprint (SHA-256): {fp}");
+                Some(fp)
+            }
+            Ok(_) => {
+                eprintln!(
+                    "  ⚠  Could not determine cluster CA fingerprint from \
+                     {primary_cp_name} — membership verification will be skipped."
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!(
+                    "  ⚠  Could not determine cluster CA fingerprint: {e} \
+                     — membership verification will be skipped."
+                );
+                None
+            }
+        }
+    };
+
     let worker_join_cmd = {
-        // Fetch join command from primary CP using appropriate routing
         let cmd_result = if any_worker_needs_jump {
             ssh_capture_jump(
                 &jumphost_ip,
@@ -455,7 +480,6 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         }
     };
 
-    // worker_entries[i] and worker_with_ips[i] are aligned
     for (idx, ((name, ip), (_, prefer_public))) in worker_with_ips
         .iter()
         .zip(worker_entries.iter())
@@ -469,13 +493,124 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
             println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
         }
 
-        if !prompt_yes_no("  Fetch join command and join?") {
+        if !prompt_yes_no("  Check and join?") {
             println!("  Skipped.");
             continue;
         }
 
-        // DNS guard — workers must resolve the control-plane endpoint to the
-        // primary CP's IP, which is the single north star for the cluster.
+        // ── Idempotency check ─────────────────────────────────────────────────
+        //
+        // /etc/kubernetes/kubelet.conf is written by `kubeadm join` only after
+        // a *successful* join.  Checking for its existence is therefore more
+        // reliable than asking whether kubelet is active, which can be true
+        // even after a partial or failed join attempt.
+        let join_check_cmd =
+            "test -f /etc/kubernetes/kubelet.conf && echo joined || echo not-joined";
+
+        let join_status = if worker_needs_jump {
+            ssh_capture_jump(
+                &jumphost_ip,
+                ssh_user,
+                ip,
+                ssh_user,
+                &ssh_priv_path,
+                join_check_cmd,
+            )
+        } else {
+            ssh_capture(ip, ssh_user, &ssh_priv_path, join_check_cmd)
+        };
+
+        match join_status {
+            // kubelet.conf found — node was previously joined.
+            Ok(ref s) if s.trim() == "joined" => {
+                match &primary_ca_fingerprint {
+                    Some(expected_fp) => {
+                        // Extract the CA certificate that was embedded into
+                        // kubelet.conf at join time and compute its fingerprint.
+                        // kubeadm always inlines the CA as a base64-encoded DER
+                        // blob under `certificate-authority-data`, so we can
+                        // pull it with awk, decode it, and feed it to openssl.
+                        let worker_fp_cmd = "sudo awk '/certificate-authority-data/{print $2; exit}' \
+                             /etc/kubernetes/kubelet.conf \
+                             | base64 -d \
+                             | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
+                             | cut -d= -f2";
+
+                        let worker_fp = if worker_needs_jump {
+                            ssh_capture_jump(
+                                &jumphost_ip,
+                                ssh_user,
+                                ip,
+                                ssh_user,
+                                &ssh_priv_path,
+                                worker_fp_cmd,
+                            )
+                        } else {
+                            ssh_capture(ip, ssh_user, &ssh_priv_path, worker_fp_cmd)
+                        };
+
+                        match worker_fp {
+                            // ✓ Same CA — node is already part of this cluster.
+                            Ok(ref fp) if fp.trim() == expected_fp.as_str() => {
+                                println!(
+                                    "  ✓ {name} already joined to this cluster \
+                                     (CA fingerprint verified) — skipping."
+                                );
+                                continue;
+                            }
+                            // ✗ Different CA — node belongs to a foreign cluster.
+                            // Refusing to re-join protects both the node and the
+                            // existing cluster from accidental data loss.
+                            Ok(ref fp) if !fp.trim().is_empty() => {
+                                eprintln!(
+                                    "  ✗ {name} is joined to a DIFFERENT cluster!\n\
+                                     Expected CA fingerprint : {expected_fp}\n\
+                                     Node CA fingerprint     : {}\n\
+                                     Refusing to re-join — manual intervention required \
+                                     (reset the node with `sudo kubeadm reset` first).",
+                                    fp.trim()
+                                );
+                                continue;
+                            }
+                            // Could not read the fingerprint — play it safe.
+                            Ok(_) => {
+                                eprintln!(
+                                    "  ⚠  {name} has kubelet.conf but the CA fingerprint \
+                                     could not be extracted — skipping to avoid \
+                                     overwriting an existing cluster member."
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  ⚠  {name} has kubelet.conf but CA fingerprint \
+                                     verification failed ({e}) — skipping to avoid \
+                                     overwriting an existing cluster member."
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    // CA fingerprint unavailable (primary CP unreachable earlier).
+                    // Still skip — it is safer to do nothing than to blindly re-join.
+                    None => {
+                        println!(
+                            "  ✓ {name} already has kubelet.conf — skipping \
+                             (CA fingerprint verification unavailable)."
+                        );
+                        continue;
+                    }
+                }
+            }
+            // SSH / command error — warn but continue so the operator can decide.
+            Err(e) => {
+                eprintln!("  ⚠  Could not check join status on {name}: {e}");
+            }
+            // "not-joined" — fall through to the join logic below.
+            _ => {}
+        }
+
+        // ── DNS guard ─────────────────────────────────────────────────────────
         ensure_cp_endpoint_resolves(
             name,
             &cp_endpoint,
@@ -496,39 +631,9 @@ pub fn play_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
         }
 
         println!("  Join command: {worker_join_cmd}");
-
-        let already_joined = if worker_needs_jump {
-            ssh_capture_jump(
-                &jumphost_ip,
-                ssh_user,
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                "systemctl is-active kubelet 2>/dev/null && echo yes || echo no",
-            )
-        } else {
-            ssh_capture(
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                "systemctl is-active kubelet 2>/dev/null && echo yes || echo no",
-            )
-        };
-
-        match already_joined {
-            Ok(ref s) if s.trim() == "yes" => {
-                println!("  ✓ {name} already has kubelet active — skipping.");
-                continue;
-            }
-            Err(e) => {
-                eprintln!("  ⚠ Could not check kubelet status on {name}: {e}");
-            }
-            _ => {}
-        }
-
         println!("\n  Joining {name} …\n");
-        let join_full = format!("sudo {worker_join_cmd}");
 
+        let join_full = format!("sudo {worker_join_cmd}");
         let result = if worker_needs_jump {
             ssh_run_jump(
                 &jumphost_ip,
