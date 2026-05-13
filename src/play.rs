@@ -665,12 +665,12 @@ pub fn play_config(
     };
 
     println!("\n  Using {primary_label} IP:");
-    println!("    ssh -i {ssh_priv_path} {ssh_user}@{primary_ip_to_show}");
-    println!("    sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get po -A -o wide");
+    println!("    ssh -i {ssh_priv_path} {ssh_user}@{primary_ip_to_show} \\");
+    println!("      sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get po -A -o wide");
 
     println!("\n  Using {alt_label} IP:");
-    println!("    ssh -i {ssh_priv_path} {ssh_user}@{alt_ip_to_show}");
-    println!("    sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get po -A -o wide");
+    println!("    ssh -i {ssh_priv_path} {ssh_user}@{alt_ip_to_show} \\");
+    println!("      sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get po -A -o wide");
 
     Ok(())
 }
