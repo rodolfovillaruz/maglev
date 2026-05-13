@@ -132,7 +132,6 @@ pub fn approve_pending_csrs(
     jumphost_ip: &str,
     auto_approve: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // When --auto-approve is set every interactive gate is bypassed.
     let confirm = |question: &str| -> bool {
         if auto_approve {
             println!("{question} [auto-approved]");
@@ -144,10 +143,15 @@ pub fn approve_pending_csrs(
 
     println!("\n  → Step B.5: approve pending kubelet-serving CSRs");
 
-    // Collect the names of every CSR currently in Pending state.
+    // Collect CSR names and requestors. Handles both cases:
+    // - No REQUESTEDNAME column: condition is $NF
+    // - With REQUESTEDNAME column: condition is $(NF-1), name is $NF
     let list_cmd = format!(
         "kubectl --kubeconfig {ADMIN_KUBECONFIG} get csr --no-headers 2>/dev/null \
-         | awk '$NF == \"Pending\" {{print $1}}'"
+         | awk '$NF == \"Pending\" || $(NF-1) == \"Pending\" {{ \
+             if ($(NF-1) == \"Pending\") print $1, $NF; \
+             else print $1 \
+         }}'"
     );
 
     let raw = if any_worker_needs_jump {
@@ -164,10 +168,19 @@ pub fn approve_pending_csrs(
         ssh_capture(cp_ip, ssh_user, ssh_priv_path, &list_cmd).unwrap_or_default()
     };
 
-    let pending: Vec<&str> = raw
+    // Parse: name and optional requestor
+    let pending: Vec<(String, String)> = raw
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            match parts.len() {
+                0 => (String::new(), String::new()),
+                1 => (parts[0].to_string(), String::new()),
+                _ => (parts[0].to_string(), parts[1].to_string()),
+            }
+        })
         .collect();
 
     if pending.is_empty() {
@@ -179,8 +192,12 @@ pub fn approve_pending_csrs(
         "\n  Found {} pending CSR(s) waiting for approval:\n",
         pending.len()
     );
-    for name in &pending {
-        println!("    • {name}");
+    for (name, requestor) in &pending {
+        if requestor.is_empty() {
+            println!("    • {name}");
+        } else {
+            println!("    • {name} (requestor: {requestor})");
+        }
     }
     println!();
 
@@ -200,11 +217,13 @@ pub fn approve_pending_csrs(
         return Ok(());
     }
 
-    // Build a single `certificate approve` call with all names on one line
-    // to avoid spawning one SSH session per CSR.
     let approve_cmd = format!(
         "kubectl --kubeconfig {ADMIN_KUBECONFIG} certificate approve {}",
-        pending.join(" ")
+        pending
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     println!("    $ {approve_cmd}");
 
