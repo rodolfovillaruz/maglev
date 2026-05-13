@@ -21,6 +21,7 @@ pub fn provision_control_plane_node(
     is_ha: bool,
     any_worker_needs_jump: bool,
     jumphost_ip: &str,
+    auto_approve: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
     // Create kubeadm config with serverTLSBootstrap enabled
@@ -101,6 +102,7 @@ serverTLSBootstrap: true
         ssh_priv_path,
         any_worker_needs_jump,
         jumphost_ip,
+        auto_approve,
     )
 }
 

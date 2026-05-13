@@ -248,6 +248,7 @@ pub fn play_config(
                 &ssh_priv_path,
                 any_worker_needs_jump,
                 &jumphost_ip,
+                auto_approve,
             )?;
         } else {
             provision_control_plane_node(
@@ -259,6 +260,7 @@ pub fn play_config(
                 is_ha,
                 any_worker_needs_jump,
                 &jumphost_ip,
+                auto_approve,
             )?;
         }
     } else {
