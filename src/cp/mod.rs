@@ -40,10 +40,10 @@ pub fn provision_control_plane_node(
     } else {
         let items = cert_sans
             .iter()
-            .map(|s| format!("    - {s}"))
+            .map(|s| format!("  - {s}"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("  apiServer:\n    certSANs:\n{items}\n")
+        format!("apiServer:\n  certSANs:\n{items}\n")
     };
 
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
