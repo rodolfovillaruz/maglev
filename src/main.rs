@@ -14,7 +14,6 @@ use command::destroy::destroy_config;
 use command::play::play_config;
 use command::reset::reset_config;
 use command::restart::restart_config;
-use cp::provision_control_plane_node;
 use ip::IpAddressType;
 use provider::gcp::print_build_credential;
 use ssh::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};

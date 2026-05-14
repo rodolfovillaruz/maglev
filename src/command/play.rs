@@ -1,10 +1,11 @@
 use crate::IpAddressType;
-use crate::cp::cilium::provision_cilium;
-use crate::cp::{ensure_cp_endpoint_resolves, verify_control_plane_endpoint};
+use crate::cp::{
+    cilium::provision_cilium, ensure_cp_endpoint_resolves, provision_control_plane_node,
+    verify_control_plane_endpoint,
+};
 use crate::expand_tilde;
 use crate::prompt_yes_no;
 use crate::provider::load_provider;
-use crate::provision_control_plane_node;
 use crate::rule::resolve_rules;
 use crate::spec::MergedSpec;
 use crate::utils::approve_pending_csrs;
