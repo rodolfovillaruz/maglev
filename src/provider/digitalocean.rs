@@ -40,9 +40,6 @@ impl DigitalOceanProvider {
             );
         }
 
-        let email = body["account"]["email"].as_str().unwrap_or("unknown");
-        println!("  Authenticated as: {email}");
-
         Ok(Self {
             token: creds.token.clone(),
             region: creds.region.clone(),
