@@ -8,6 +8,7 @@ use crate::provision_control_plane_node;
 use crate::rule::resolve_rules;
 use crate::spec::MergedSpec;
 use crate::utils::approve_pending_csrs;
+use crate::utils::check_containerd_running;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 
 // ---------------------------------------------------------------------------
@@ -174,6 +175,35 @@ pub fn play_config(
              in the relevant spec block of your config."
         );
     }
+
+    // ── Preflight check — Ensure containerd is running ──────────────────────
+    println!("\n━━ Preflight check — Verifying containerd on all nodes ━━━━━━━━━━━━━━");
+
+    println!("\n  Control-plane nodes:");
+    for (name, ip) in &cp_with_ips {
+        let needs_jump = cp_entries
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, prefer_public)| !prefer_public && jumphost_is_public)
+            .unwrap_or(false);
+
+        check_containerd_running(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)?;
+        println!("    ✓ {name}");
+    }
+
+    println!("\n  Worker nodes:");
+    for (name, ip) in &worker_with_ips {
+        let needs_jump = worker_entries
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, prefer_public)| !prefer_public && jumphost_is_public)
+            .unwrap_or(false);
+
+        check_containerd_running(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)?;
+        println!("    ✓ {name}");
+    }
+
+    println!("\n  ✓ All nodes ready for provisioning.\n");
 
     // ── Step 1 / 3 — Primary control-plane ───────────────────────────────────
     println!("\n━━ Step 1 / 3 — Primary control-plane init ({primary_cp_name}) ━━━━━━━━━━━━");

@@ -250,3 +250,46 @@ pub fn approve_pending_csrs(
 
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helper: Check containerd status
+// ─────────────────────────────────────────────────────────────────────────
+
+pub fn check_containerd_running(
+    ip: &str,
+    name: &str,
+    ssh_user: &str,
+    ssh_priv_path: &str,
+    needs_jump: bool,
+    jumphost_ip: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let status = if needs_jump {
+        ssh_capture_jump(
+            jumphost_ip,
+            ssh_user,
+            ip,
+            ssh_user,
+            ssh_priv_path,
+            "systemctl is-active --quiet containerd && echo ok || echo failed",
+        )?
+    } else {
+        ssh_capture(
+            ip,
+            ssh_user,
+            ssh_priv_path,
+            "systemctl is-active --quiet containerd && echo ok || echo failed",
+        )?
+    };
+
+    if status.trim() == "ok" {
+        Ok(())
+    } else {
+        Err(format!(
+            "✗ containerd is not running on {name} ({ip})\n  \
+             Cloud-init may still be installing packages. \
+             Please wait a moment and try again, or manually run:\n  \
+             sudo systemctl restart containerd"
+        )
+        .into())
+    }
+}
