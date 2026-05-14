@@ -69,8 +69,7 @@ pub fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
         let assign_public_ip = r.merged.ip_address == IpAddressType::Public;
 
         for node in &r.nodes {
-            println!("\n  ── Creating instance: {node} ──");
-            let resp = provider.create_vm(
+            let _ = provider.create_vm(
                 node,
                 &r.merged.machine_type,
                 &r.merged.boot_disk_image,
@@ -79,7 +78,7 @@ pub fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
                 &r.merged.script,
                 assign_public_ip,
             )?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            println!("\nInstance \"{node}\" created");
         }
     }
 

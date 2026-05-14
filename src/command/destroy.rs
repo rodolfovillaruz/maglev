@@ -38,9 +38,10 @@ pub fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error
     let provider = loaded.provider();
 
     for (group_name, group_type, node) in &all_nodes {
-        println!("\n  ── Deleting [{group_type}/{group_name}] {node} ──");
         match provider.destroy_vm(node) {
-            Ok(body) => println!("{}", serde_json::to_string_pretty(&body)?),
+            Ok(_) => {
+                println!("\n[{group_type}/{group_name}] {node} deleted");
+            }
             Err(e) => eprintln!("  ✗ Failed to delete {node}: {e}"),
         }
     }
