@@ -11,7 +11,6 @@ pub enum LoadedProvider {
     Gcp {
         common: CommonConfig,
         location: String,
-        identity: String,
         provisioner: Option<ProvisionerYaml>,
         provider: GcpProvider,
     },
@@ -42,13 +41,11 @@ impl LoadedProvider {
         match self {
             LoadedProvider::Gcp {
                 location,
-                identity,
                 provisioner,
                 ..
             } => {
                 println!("  Provider:        GCP");
                 println!("  Zone:            {location}");
-                println!("  Service account: {identity}");
                 if let Some(p) = provisioner {
                     println!("  Provisioner:     {} ({})", p.node, p.provisioner_type);
                 }
@@ -133,7 +130,6 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
         };
 
         let location = creds.zone.clone();
-        let identity = creds.client_email.clone();
         let provisioner = yaml.provisioner.clone();
         let provider = GcpProvider::new(&creds)?;
 
@@ -145,7 +141,6 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
                 provisioner: yaml.provisioner,
             },
             location,
-            identity,
             provisioner,
             provider,
         })
