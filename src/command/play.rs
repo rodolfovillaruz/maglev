@@ -73,6 +73,9 @@ pub fn play_config(
     let ssh_user = &first_cp_merged.user;
     let ssh_pub_path = first_cp_merged.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
+    // Collect certSANs from the primary control-plane spec (already unioned
+    // across all spec layers by merge_spec_configs).
+    let cert_sans: Vec<String> = first_cp_merged.cert_sans.clone();
 
     let cp_count = cp_entries.len();
     if cp_count == 0 {
@@ -165,6 +168,13 @@ pub fn play_config(
     };
 
     println!("\n  control-plane-endpoint: {cp_endpoint}");
+
+    if !cert_sans.is_empty() {
+        println!("  apiServer certSANs:");
+        for san in &cert_sans {
+            println!("    - {san}");
+        }
+    }
 
     if is_ha && cp_endpoint.starts_with(primary_cp_ip.as_str()) {
         eprintln!(
@@ -290,6 +300,7 @@ pub fn play_config(
                 any_worker_needs_jump,
                 &jumphost_ip,
                 auto_approve,
+                &cert_sans,
             )?;
         }
     } else {

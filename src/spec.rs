@@ -21,11 +21,17 @@ pub struct MergedSpec {
     pub script: String,
     pub user: String,
     pub control_plane_endpoint: Option<String>,
+    /// Union of all `apiServer.certSANs` entries from every spec layer that
+    /// contributed to this node.  Order is preserved; duplicates are removed
+    /// on first-seen basis.  Empty when no spec defines certSANs.
+    pub cert_sans: Vec<String>,
 }
 
 /// Merge `spec_names` (in order) from `specs_map` into a single
-/// [`MergedSpec`].  Later entries override earlier ones for any field both
-/// define.
+/// [`MergedSpec`].  Later entries override earlier ones for scalar fields.
+/// For `cert_sans` all layers are unioned and deduplicated (first-seen wins
+/// on collision) so that a base spec can supply cluster-wide SANs while a
+/// derived spec adds node-specific ones.
 pub fn merge_spec_configs(
     spec_names: &[String],
     specs_map: &HashMap<&str, &SpecConfigYaml>,
@@ -38,6 +44,8 @@ pub fn merge_spec_configs(
     let mut script: Option<String> = None;
     let mut user: Option<String> = None;
     let mut control_plane_endpoint: Option<String> = None;
+    // Accumulated across all layers; duplicates are skipped.
+    let mut cert_sans: Vec<String> = Vec::new();
 
     for name in spec_names {
         let cfg = specs_map
@@ -68,6 +76,14 @@ pub fn merge_spec_configs(
         if let Some(v) = &cfg.control_plane_endpoint {
             control_plane_endpoint = Some(v.clone());
         }
+        // Union certSANs from this layer, skipping entries already present.
+        if let Some(api) = &cfg.api_server {
+            for san in &api.cert_sans {
+                if !cert_sans.contains(san) {
+                    cert_sans.push(san.clone());
+                }
+            }
+        }
     }
 
     Ok(MergedSpec {
@@ -87,5 +103,6 @@ pub fn merge_spec_configs(
             .ok_or_else(|| format!("No 'script' found after merging specs {spec_names:?}"))?,
         user: user.ok_or_else(|| format!("No 'user' found after merging specs {spec_names:?}"))?,
         control_plane_endpoint,
+        cert_sans,
     })
 }

@@ -22,35 +22,61 @@ pub fn provision_control_plane_node(
     any_worker_needs_jump: bool,
     jumphost_ip: &str,
     auto_approve: bool,
+    cert_sans: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // ── Step A: kubeadm init ──────────────────────────────────────────────────
-    // Create kubeadm config with serverTLSBootstrap enabled
-    let kubeadm_config = if is_ha {
-        format!(
-            r#"apiVersion: kubeadm.k8s.io/v1beta3
-kind: ClusterConfiguration
-controlPlaneEndpoint: {cp_endpoint}
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-serverTLSBootstrap: true
-"#
-        )
+    // ── Build optional apiServer.certSANs block ───────────────────────────────
+    //
+    // Produces (when SANs are present):
+    //
+    //   apiServer:
+    //     certSANs:
+    //     - 192.168.1.100
+    //     - api.example.com
+    //
+    // The trailing newline means it can be concatenated directly into the
+    // YAML document without further spacing adjustments.
+    let api_server_block = if cert_sans.is_empty() {
+        String::new()
     } else {
-        r#"apiVersion: kubeadm.k8s.io/v1beta3
-kind: ClusterConfiguration
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-serverTLSBootstrap: true
-"#
-        .to_string()
+        let items = cert_sans
+            .iter()
+            .map(|s| format!("    - {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("  apiServer:\n    certSANs:\n{items}\n")
     };
 
-    // Write config to remote node
+    // ── Step A: kubeadm init ──────────────────────────────────────────────────
+    // Create kubeadm config with serverTLSBootstrap enabled.
+    //
+    // ClusterConfiguration reference:
+    //   https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta3/
+    let kubeadm_config = if is_ha {
+        format!(
+            "apiVersion: kubeadm.k8s.io/v1beta3\n\
+             kind: ClusterConfiguration\n\
+             controlPlaneEndpoint: {cp_endpoint}\n\
+             {api_server_block}\
+             ---\n\
+             apiVersion: kubelet.config.k8s.io/v1beta1\n\
+             kind: KubeletConfiguration\n\
+             serverTLSBootstrap: true\n"
+        )
+    } else {
+        format!(
+            "apiVersion: kubeadm.k8s.io/v1beta3\n\
+             kind: ClusterConfiguration\n\
+             {api_server_block}\
+             ---\n\
+             apiVersion: kubelet.config.k8s.io/v1beta1\n\
+             kind: KubeletConfiguration\n\
+             serverTLSBootstrap: true\n"
+        )
+    };
+
+    // Write config to remote node.
     let config_script = format!(
-        "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{}\nKUBEADM_CONFIG_EOF",
-        kubeadm_config
+        "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{kubeadm_config}\nKUBEADM_CONFIG_EOF"
     );
     if any_worker_needs_jump {
         ssh_run_jump(
@@ -65,7 +91,7 @@ serverTLSBootstrap: true
         ssh_run(cp_ip, ssh_user, ssh_priv_path, &config_script)?;
     }
 
-    // Build kubeadm init command using the config file
+    // Build kubeadm init command using the config file.
     let kubeadm_init_cmd = if is_ha {
         "sudo kubeadm init --config /tmp/kubeadm-config.yaml --upload-certs"
     } else {
@@ -88,10 +114,10 @@ serverTLSBootstrap: true
             cp_ip,
             ssh_user,
             ssh_priv_path,
-            &kubeadm_init_cmd,
+            kubeadm_init_cmd,
         )?;
     } else {
-        ssh_run(cp_ip, ssh_user, ssh_priv_path, &kubeadm_init_cmd)?;
+        ssh_run(cp_ip, ssh_user, ssh_priv_path, kubeadm_init_cmd)?;
     }
     println!("\n  ✓ kubeadm init complete.");
 
@@ -218,18 +244,14 @@ pub fn ensure_cp_endpoint_resolves(
 
     println!("  Checking if '{host}' resolves on {node_name} …");
 
-    // Try to resolve the hostname and capture the resolved IP
     let resolve_cmd = format!("getent hosts {host} 2>/dev/null | awk '{{ print $1 }}' || echo ''");
     let resolved_ip = capture(&resolve_cmd)?.trim().to_string();
 
     if !resolved_ip.is_empty() {
-        // Hostname already resolves to something
         if resolved_ip == fallback_ip {
-            // Already resolves to the expected IP — nothing to do
             println!("  ✓ '{host}' resolves to {resolved_ip}.");
             return Ok(());
         } else {
-            // Resolves but to wrong IP — need to update
             eprintln!(
                 "\n  ⚠  '{host}' currently resolves to {resolved_ip} on {node_name},\n\
                  but it should resolve to {fallback_ip}.\n\
@@ -242,7 +264,6 @@ pub fn ensure_cp_endpoint_resolves(
             if prompt_yes_no(&format!(
                 "  Update '{host}' in /etc/hosts to {fallback_ip} on {node_name}?"
             )) {
-                // Remove old entry and add new one
                 run(&format!(
                     "sudo sed -i '/[[:space:]]{host}[[:space:]]*$/d' /etc/hosts && \
                      echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
@@ -280,7 +301,6 @@ pub fn ensure_cp_endpoint_resolves(
             }
         }
     } else {
-        // Hostname doesn't resolve at all
         eprintln!(
             "\n  ⚠  '{host}' does NOT resolve on {node_name}.\n\
              \n\

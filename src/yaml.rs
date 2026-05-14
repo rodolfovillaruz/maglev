@@ -1,5 +1,6 @@
 use crate::IpAddressType;
 use crate::utils::string_or_vec;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Shared YAML types
@@ -86,6 +87,10 @@ pub struct SpecConfigYaml {
     )]
     pub control_plane_endpoint: Option<String>,
 
+    // ── new ────────────────────────────────────────────────────────────────
+    #[serde(rename = "apiServer", default)]
+    pub api_server: Option<ApiServerConfigYaml>,
+
     // ── specs-origin fields ─────────────────────────────────────────────────
     #[serde(
         rename = "machine-type",
@@ -126,4 +131,11 @@ pub struct CommonConfig {
     pub specs: Vec<SpecYaml>,
     pub rules: Vec<RuleYaml>,
     pub provisioner: Option<ProvisionerYaml>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
+pub struct ApiServerConfigYaml {
+    /// Additional Subject Alternative Names for the API-server TLS certificate.
+    #[serde(rename = "certSANs", default)]
+    pub cert_sans: Vec<String>,
 }

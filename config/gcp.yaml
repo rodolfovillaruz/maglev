@@ -37,6 +37,11 @@ gcp:
       machine-type: e2-standard-2
       boot-disk-image: ubuntu-2404-lts-amd64
       control-plane-endpoint: k8s-api.example.com
+      apiServer:
+        certSANs:
+        - 192.168.1.100
+        - api.example.com
+        - k8s-master.local
   - name: control-plane-public
     config:
     - boot-disk-size: 20
