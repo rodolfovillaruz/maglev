@@ -37,7 +37,7 @@ pub struct RuleYaml {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct SpecYaml {
     pub name: String,
-    pub config: Vec<SpecConfigYaml>,
+    pub config: Vec<GenericsConfigYaml>,
 }
 
 /// Optional provisioner node configuration for SSH jumphost routing.
@@ -63,7 +63,7 @@ pub struct ProvisionerYaml {
 /// After merging, every required field must be present or `resolve_rules`
 /// returns an error.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct SpecConfigYaml {
+pub struct GenericsConfigYaml {
     // ── generics-origin fields ──────────────────────────────────────────────
     #[serde(
         rename = "ssh-public-key",

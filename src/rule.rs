@@ -1,4 +1,4 @@
-use crate::SpecConfigYaml;
+use crate::GenericsConfigYaml;
 use crate::spec::{MergedSpec, merge_spec_configs};
 use crate::yaml::CommonConfig;
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ pub fn resolve_rules(
         .collect();
 
     // Index specs by name → first config entry
-    let specs_map: HashMap<&str, &SpecConfigYaml> = common
+    let specs_map: HashMap<&str, &GenericsConfigYaml> = common
         .specs
         .iter()
         .filter_map(|s| s.config.first().map(|c| (s.name.as_str(), c)))

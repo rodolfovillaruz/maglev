@@ -17,7 +17,7 @@ digitalocean:
     - maglev-worker-gamma
     - maglev-worker-delta
     - maglev-worker-epsilon
-  specs:
+  generics:
   - name: cisak
     config:
     - script: |-

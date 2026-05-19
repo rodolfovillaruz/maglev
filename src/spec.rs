@@ -1,5 +1,5 @@
+use crate::GenericsConfigYaml;
 use crate::IpAddressType;
-use crate::SpecConfigYaml;
 use std::collections::HashMap;
 // ---------------------------------------------------------------------------
 // Spec merging
@@ -34,7 +34,7 @@ pub struct MergedSpec {
 /// derived spec adds node-specific ones.
 pub fn merge_spec_configs(
     spec_names: &[String],
-    specs_map: &HashMap<&str, &SpecConfigYaml>,
+    specs_map: &HashMap<&str, &GenericsConfigYaml>,
 ) -> Result<MergedSpec, Box<dyn std::error::Error>> {
     let mut machine_type: Option<String> = None;
     let mut boot_disk_image: Option<String> = None;
