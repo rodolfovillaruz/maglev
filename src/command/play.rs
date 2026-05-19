@@ -225,7 +225,7 @@ pub fn play_config(
             primary_cp_name,
             &cp_endpoint,
             primary_cp_ip,
-            |cmd| match any_worker_needs_jump {
+            |cmd| match primary_cp_prefer_public {
                 true => ssh_capture_jump(
                     &jumphost_ip,
                     ssh_user,
@@ -236,7 +236,7 @@ pub fn play_config(
                 ),
                 false => ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
             },
-            |cmd| match any_worker_needs_jump {
+            |cmd| match primary_cp_prefer_public {
                 true => ssh_run_jump(
                     &jumphost_ip,
                     ssh_user,
@@ -249,7 +249,7 @@ pub fn play_config(
             },
         )?;
 
-        let already_init = if any_worker_needs_jump {
+        let already_init = if primary_cp_prefer_public {
             ssh_capture_jump(
                 &jumphost_ip,
                 ssh_user,
