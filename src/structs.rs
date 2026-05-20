@@ -122,17 +122,6 @@ pub struct GenericsConfigYaml {
     pub ip_address: Option<IpAddressType>,
 }
 
-// ---------------------------------------------------------------------------
-// Unified view of a loaded config (provider-agnostic body + typed creds)
-// ---------------------------------------------------------------------------
-
-pub struct CommonConfig {
-    pub groups: Vec<GroupYaml>,
-    pub specs: Vec<SpecYaml>,
-    pub rules: Vec<RuleYaml>,
-    pub provisioner: Option<ProvisionerYaml>,
-}
-
 #[derive(Debug, Clone, Deserialize, Default, Serialize)]
 pub struct ApiServerConfigYaml {
     /// Additional Subject Alternative Names for the API-server TLS certificate.
@@ -164,4 +153,34 @@ pub struct MergedSpec {
     /// contributed to this node.  Order is preserved; duplicates are removed
     /// on first-seen basis.  Empty when no spec defines certSANs.
     pub cert_sans: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DiskYaml {
+    pub name: String,
+    /// Disk capacity in Gigabytes.
+    #[serde(rename = "size-gb")]
+    pub size_gb: u64,
+    /// Target mount path (e.g., `/mnt/data`).
+    #[serde(
+        rename = "mount-path",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mount_path: Option<String>,
+    /// Optional block device identifier or volume type.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub disk_type: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Updated CommonConfig
+// ---------------------------------------------------------------------------
+
+pub struct CommonConfig {
+    pub groups: Vec<GroupYaml>,
+    pub specs: Vec<SpecYaml>,
+    pub rules: Vec<RuleYaml>,
+    pub provisioner: Option<ProvisionerYaml>,
+    pub disks: Option<Vec<DiskYaml>>,
 }
