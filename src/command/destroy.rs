@@ -1,4 +1,5 @@
 use crate::provider::load_provider;
+use crate::state::State;
 use crate::utils::prompt_yes_no;
 
 // ---------------------------------------------------------------------------
@@ -11,6 +12,10 @@ pub fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error
 
     let loaded = load_provider(config_path)?;
     let common = loaded.common();
+
+    // 1. Load the state to retrieve instance IDs.
+    // DigitalOcean requires the Droplet ID (stored in state) disguised as the name to destroy.
+    let mut state = State::load(config_path);
 
     println!("\n── Provider settings ────────────────────────────────────────────────────");
     loaded.describe();
@@ -38,12 +43,33 @@ pub fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error
     let provider = loaded.provider();
 
     for (group_name, group_type, node) in &all_nodes {
-        match provider.destroy_vm(node) {
+        // Look up the ID in the state file. If present, pass it as the target.
+        // Otherwise, fallback to the original node name (e.g., for GCP which doesn't use state IDs).
+        let target = match state.instances.get(*node) {
+            Some(id) => id.as_str(),
+            None => *node,
+        };
+
+        match provider.destroy_vm(target) {
             Ok(_) => {
                 println!("\n[{group_type}/{group_name}] {node} deleted");
+                state.instances.remove(*node);
             }
-            Err(e) => eprintln!("  ✗ Failed to delete {node}: {e}"),
+            Err(e) => {
+                // Gracefully handle 404 Not Found (already deleted)
+                if e.to_string().contains("404") {
+                    println!("\n[{group_type}/{group_name}] {node} not found (already deleted)");
+                    state.instances.remove(*node);
+                } else {
+                    eprintln!("  ✗ Failed to delete {node}: {e}");
+                }
+            }
         }
+    }
+
+    // 2. Save updated state (removing destroyed instances) so apply works cleanly next time
+    if let Err(e) = state.save(config_path) {
+        eprintln!("\n⚠ Failed to save state file updates: {e}");
     }
 
     println!("\n✓ Deletion requests submitted. Operations may take a minute to complete.");
