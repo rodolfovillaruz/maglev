@@ -93,7 +93,6 @@ impl Provider for GcpProvider {
         instance_name: &str,
         machine_type: &str,
         boot_disk_image: &str,
-        boot_disk_size_gb: u64,
         ssh_keys_metadata: &str,
         startup_script: &str,
         assign_public_ip: bool,
@@ -146,7 +145,6 @@ impl Provider for GcpProvider {
                 "autoDelete": true,
                 "initializeParams": {
                     "sourceImage": resolve_image(boot_disk_image),
-                    "diskSizeGb":  boot_disk_size_gb.to_string(),
                 }
             }],
             "networkInterfaces": [network_interface],
@@ -531,7 +529,7 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct GcpYaml {
     pub group: Vec<GroupYaml>,
-    pub specs: Vec<GenericsYaml>,
+    pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub credentials: GcpCredentialsYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]

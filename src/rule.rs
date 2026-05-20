@@ -1,7 +1,7 @@
 use crate::GenericsConfigYaml;
 use crate::structs::CommonConfig;
-use crate::structs::MergedSpec;
-use crate::utils::merge_spec_configs;
+use crate::structs::CommonMergedSpec;
+use crate::utils::common_merge_spec_configs;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -11,23 +11,23 @@ use std::collections::HashMap;
 /// The fully resolved view of a single rule: group metadata, the ordered list
 /// of spec names, all node names collected from the referenced groups, and the
 /// merged spec ready for use.
-pub struct ResolvedRule {
+pub struct CommonResolvedRule {
     /// Names of every group referenced by this rule.
     pub group_names: Vec<String>,
     /// The shared `type` of all groups in this rule (`"control-plane"` /
     /// `"worker"`).
     pub group_type: String,
     /// Names of every spec referenced by this rule (merge order).
-    pub spec_names: Vec<String>,
+    pub generic_names: Vec<String>,
     /// Every node name collected from all referenced groups.
     pub nodes: Vec<String>,
     /// Result of merging all referenced specs left-to-right.
-    pub merged: MergedSpec,
+    pub merged: CommonMergedSpec,
 }
 
 pub fn resolve_rules(
     common: &CommonConfig,
-) -> Result<Vec<ResolvedRule>, Box<dyn std::error::Error>> {
+) -> Result<Vec<CommonResolvedRule>, Box<dyn std::error::Error>> {
     // Index groups by name → (type, nodes)
     let groups: HashMap<&str, (&str, &[String])> = common
         .groups
@@ -75,12 +75,12 @@ pub fn resolve_rules(
                 .to_string();
 
             // Merge specs
-            let merged = merge_spec_configs(&rule.specs, &specs_map)?;
+            let merged = common_merge_spec_configs(&rule.generics, &specs_map)?;
 
-            Ok(ResolvedRule {
+            Ok(CommonResolvedRule {
                 group_names: rule.group.clone(),
                 group_type,
-                spec_names: rule.specs.clone(),
+                generic_names: rule.generics.clone(),
                 nodes,
                 merged,
             })

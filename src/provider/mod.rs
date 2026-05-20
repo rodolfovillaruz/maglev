@@ -81,7 +81,6 @@ pub trait Provider {
         instance_name: &str,
         machine_type: &str,
         boot_disk_image: &str,
-        boot_disk_size_gb: u64,
         ssh_keys_metadata: &str,
         startup_script: &str,
         assign_public_ip: bool,
@@ -120,7 +119,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
             .map_err(|e| format!("GCP YAML parse error in '{path}': {e}"))?;
         let yaml = root.gcp;
 
-        validate_specs(&yaml.specs)?;
+        validate_specs(&yaml.generics)?;
 
         let creds = GcpCredentials {
             client_email: yaml.credentials.client_email.clone(),
@@ -136,7 +135,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
         Ok(LoadedProvider::Gcp {
             common: CommonConfig {
                 groups: yaml.group,
-                generics: yaml.specs,
+                generics: yaml.generics,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,
                 disks: None,

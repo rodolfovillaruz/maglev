@@ -31,7 +31,7 @@ pub struct GroupYaml {
 pub struct RuleYaml {
     #[serde(deserialize_with = "string_or_vec")]
     pub group: Vec<String>,
-    pub specs: Vec<String>,
+    pub generics: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -139,10 +139,9 @@ pub struct ApiServerConfigYaml {
 /// Every field is required; `merge_spec_configs` returns an error when any
 /// mandatory field is absent after the merge pass.
 #[derive(Debug, Clone)]
-pub struct MergedSpec {
+pub struct CommonMergedSpec {
     pub machine_type: String,
     pub boot_disk_image: String,
-    pub boot_disk_size: u64,
     /// Defaults to [`IpAddressType::Private`] when no spec sets it.
     pub ip_address: IpAddressType,
     pub ssh_public_key: String,

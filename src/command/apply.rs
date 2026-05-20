@@ -26,14 +26,11 @@ pub fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
             "\n  groups: [{}]  type: {}  (specs: [{}])",
             r.group_names.join(", "),
             r.group_type,
-            r.spec_names.join(", "),
+            r.generic_names.join(", "),
         );
         println!(
-            "    machine-type: {}  image: {}  disk: {} GB  ip-address: {}",
-            r.merged.machine_type,
-            r.merged.boot_disk_image,
-            r.merged.boot_disk_size,
-            r.merged.ip_address,
+            "    machine-type: {}  image: {}  ip-address: {}",
+            r.merged.machine_type, r.merged.boot_disk_image, r.merged.ip_address,
         );
         println!(
             "    user: {}  ssh-public-key: {}",
@@ -73,7 +70,6 @@ pub fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
                 node,
                 &r.merged.machine_type,
                 &r.merged.boot_disk_image,
-                r.merged.boot_disk_size,
                 &ssh_meta,
                 &r.merged.script,
                 assign_public_ip,

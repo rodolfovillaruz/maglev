@@ -168,7 +168,6 @@ impl Provider for DigitalOceanProvider {
         instance_name: &str,
         machine_type: &str,
         boot_disk_image: &str,
-        boot_disk_size_gb: u64,
         ssh_keys_metadata: &str,
         startup_script: &str,
         assign_public_ip: bool,
@@ -188,10 +187,6 @@ impl Provider for DigitalOceanProvider {
             println!("    SSH key fingerprint: {fp}");
             ssh_fingerprints.push(fp);
         }
-
-        // boot_disk_size_gb: accepted for interface parity; DO sizes are
-        // fixed per slug, so this parameter is intentionally unused.
-        let _ = boot_disk_size_gb;
 
         let request_body = serde_json::json!({
             "name":      instance_name,

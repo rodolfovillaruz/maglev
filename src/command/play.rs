@@ -7,7 +7,7 @@ use crate::expand_tilde;
 use crate::prompt_yes_no;
 use crate::provider::load_provider;
 use crate::rule::resolve_rules;
-use crate::structs::MergedSpec;
+use crate::structs::CommonMergedSpec;
 use crate::utils::approve_pending_csrs;
 use crate::utils::check_containerd_running;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
@@ -44,7 +44,7 @@ pub fn play_config(
 
     let mut cp_entries: Vec<(String, bool)> = Vec::new();
     let mut worker_entries: Vec<(String, bool)> = Vec::new();
-    let mut first_cp_merged: Option<&MergedSpec> = None;
+    let mut first_cp_merged: Option<&CommonMergedSpec> = None;
 
     for rule in &resolved {
         let prefer_public = rule.merged.ip_address == IpAddressType::Public;

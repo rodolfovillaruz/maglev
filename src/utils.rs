@@ -2,7 +2,7 @@ use crate::GenericsConfigYaml;
 use crate::GenericsYaml;
 use crate::IpAddressType;
 use crate::cp::ADMIN_KUBECONFIG;
-use crate::structs::MergedSpec;
+use crate::structs::CommonMergedSpec;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 use std::collections::HashMap;
 use std::env;
@@ -303,13 +303,12 @@ pub fn check_containerd_running(
 /// For `cert_sans` all layers are unioned and deduplicated (first-seen wins
 /// on collision) so that a base spec can supply cluster-wide SANs while a
 /// derived spec adds node-specific ones.
-pub fn merge_spec_configs(
+pub fn common_merge_spec_configs(
     spec_names: &[String],
     specs_map: &HashMap<&str, &GenericsConfigYaml>,
-) -> Result<MergedSpec, Box<dyn std::error::Error>> {
+) -> Result<CommonMergedSpec, Box<dyn std::error::Error>> {
     let mut machine_type: Option<String> = None;
     let mut boot_disk_image: Option<String> = None;
-    let mut boot_disk_size: Option<u64> = None;
     let mut ip_address: Option<IpAddressType> = None;
     let mut ssh_public_key: Option<String> = None;
     let mut script: Option<String> = None;
@@ -328,9 +327,6 @@ pub fn merge_spec_configs(
         }
         if let Some(v) = &cfg.boot_disk_image {
             boot_disk_image = Some(v.clone());
-        }
-        if let Some(v) = cfg.boot_disk_size {
-            boot_disk_size = Some(v);
         }
         if let Some(v) = cfg.ip_address {
             ip_address = Some(v);
@@ -357,14 +353,11 @@ pub fn merge_spec_configs(
         }
     }
 
-    Ok(MergedSpec {
+    Ok(CommonMergedSpec {
         machine_type: machine_type
             .ok_or_else(|| format!("No 'machine-type' found after merging specs {spec_names:?}"))?,
         boot_disk_image: boot_disk_image.ok_or_else(|| {
             format!("No 'boot-disk-image' found after merging specs {spec_names:?}")
-        })?,
-        boot_disk_size: boot_disk_size.ok_or_else(|| {
-            format!("No 'boot-disk-size' found after merging specs {spec_names:?}")
         })?,
         ip_address: ip_address.unwrap_or_default(),
         ssh_public_key: ssh_public_key.ok_or_else(|| {
