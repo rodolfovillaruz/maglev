@@ -1,5 +1,5 @@
 use crate::provider::Provider;
-use crate::structs::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
+use crate::structs::{GenericsYaml, GroupYaml, ProvisionerYaml, RuleYaml};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ pub struct DoCredentialsYaml {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct DoYaml {
     pub group: Vec<GroupYaml>,
-    pub specs: Vec<SpecYaml>,
+    pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub credentials: DoCredentialsYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]

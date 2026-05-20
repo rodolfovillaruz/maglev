@@ -1,5 +1,5 @@
 use crate::provider::Provider;
-use crate::structs::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
+use crate::structs::{GenericsYaml, GroupYaml, ProvisionerYaml, RuleYaml};
 use crate::utils::prompt_yes_no;
 use std::io::{BufRead, Write, stdin, stdout};
 
@@ -531,7 +531,7 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct GcpYaml {
     pub group: Vec<GroupYaml>,
-    pub specs: Vec<SpecYaml>,
+    pub specs: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub credentials: GcpCredentialsYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]

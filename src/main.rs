@@ -16,7 +16,7 @@ use command::restart::restart_config;
 use ip::IpAddressType;
 use provider::gcp::print_build_credential;
 use ssh::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
-use structs::{GenericsConfigYaml, SpecYaml};
+use structs::{GenericsConfigYaml, GenericsYaml};
 use utils::{expand_tilde, prompt_yes_no};
 
 // ---------------------------------------------------------------------------

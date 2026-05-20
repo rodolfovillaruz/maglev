@@ -1,6 +1,6 @@
 use crate::GenericsConfigYaml;
+use crate::GenericsYaml;
 use crate::IpAddressType;
-use crate::SpecYaml;
 use crate::cp::ADMIN_KUBECONFIG;
 use crate::structs::MergedSpec;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
@@ -105,7 +105,7 @@ pub fn prompt_yes_no(question: &str) -> bool {
 // Spec validation (pre-merge, informational only)
 // ---------------------------------------------------------------------------
 
-pub fn validate_specs(specs: &[SpecYaml]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn validate_specs(specs: &[GenericsYaml]) -> Result<(), Box<dyn std::error::Error>> {
     for spec in specs {
         for (i, cfg) in spec.config.iter().enumerate() {
             let ip_str = cfg

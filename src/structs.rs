@@ -35,7 +35,7 @@ pub struct RuleYaml {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct SpecYaml {
+pub struct GenericsYaml {
     pub name: String,
     pub config: Vec<GenericsConfigYaml>,
 }
@@ -179,7 +179,7 @@ pub struct DiskYaml {
 
 pub struct CommonConfig {
     pub groups: Vec<GroupYaml>,
-    pub specs: Vec<SpecYaml>,
+    pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub provisioner: Option<ProvisionerYaml>,
     pub disks: Option<Vec<DiskYaml>>,

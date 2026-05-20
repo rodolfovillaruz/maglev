@@ -136,7 +136,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
         Ok(LoadedProvider::Gcp {
             common: CommonConfig {
                 groups: yaml.group,
-                specs: yaml.specs,
+                generics: yaml.specs,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,
                 disks: None,
@@ -150,7 +150,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
             .map_err(|e| format!("DigitalOcean YAML parse error in '{path}': {e}"))?;
         let yaml = root.digitalocean;
 
-        validate_specs(&yaml.specs)?;
+        validate_specs(&yaml.generics)?;
 
         let creds = DigitalOceanCredentials {
             token: yaml.credentials.token.clone(),
@@ -164,7 +164,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
         Ok(LoadedProvider::DigitalOcean {
             common: CommonConfig {
                 groups: yaml.group,
-                specs: yaml.specs,
+                generics: yaml.generics,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,
                 disks: None,

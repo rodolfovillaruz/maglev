@@ -37,7 +37,7 @@ pub fn resolve_rules(
 
     // Index specs by name → first config entry
     let specs_map: HashMap<&str, &GenericsConfigYaml> = common
-        .specs
+        .generics
         .iter()
         .filter_map(|s| s.config.first().map(|c| (s.name.as_str(), c)))
         .collect();
