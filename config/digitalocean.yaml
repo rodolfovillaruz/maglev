@@ -39,23 +39,15 @@ digitalocean:
         - 192.168.1.100
         - api.example.com
         - k8s-master.local
-  - name: primary
-    config:
-    - boot-disk-size: 20
-  - name: secondary
-    config:
-    - boot-disk-size: 50
   rules:
   - group:
     - primary
-    specs:
+    generics:
     - cisak
-    - primary
   - group:
     - secondary
-    specs:
+    generics:
     - cisak
-    - secondary
   credentials:
     token: "your-digitalocean-api-token"
     region: nyc1
