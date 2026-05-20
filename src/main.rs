@@ -4,6 +4,7 @@ mod ip;
 mod provider;
 mod rule;
 mod ssh;
+mod state;
 mod structs;
 mod utils;
 
