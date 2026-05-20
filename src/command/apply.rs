@@ -99,7 +99,7 @@ pub fn apply_config(
 
             // 3. Create the instance.
             // If it exists in DO but not in state, the cloud provider will throw a Conflict Error here (Fulfilling the "throw an error" condition).
-            let instance_id = provider.create_vm(
+            let response = provider.create_vm(
                 node,
                 &r.merged.machine_type,
                 &r.merged.boot_disk_image,
@@ -107,7 +107,20 @@ pub fn apply_config(
                 &r.merged.script,
                 assign_public_ip,
             )?;
-            let id_str = instance_id.to_string();
+
+            let mut id_str = response.to_string();
+
+            // Try to extract the instance ID if the response is JSON (e.g., DigitalOcean API response)
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&id_str) {
+                // Target the specific "droplet.id" field for DigitalOcean
+                if let Some(id_val) = parsed.pointer("/droplet/id") {
+                    if let Some(num) = id_val.as_u64() {
+                        id_str = num.to_string();
+                    } else if let Some(s) = id_val.as_str() {
+                        id_str = s.to_string();
+                    }
+                }
+            }
 
             println!("\nInstance \"{node}\" created with ID: {}", id_str);
 
