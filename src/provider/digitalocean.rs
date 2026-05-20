@@ -50,33 +50,6 @@ impl DigitalOceanProvider {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Look up a droplet by name and return its numeric ID.
-    fn get_droplet_id(&self, name: &str) -> Result<u64, Box<dyn std::error::Error>> {
-        let url = format!("https://api.digitalocean.com/v2/droplets?name={}", name);
-
-        let agent = build_agent();
-        let mut resp = agent
-            .get(&url)
-            .header("Authorization", &format!("Bearer {}", self.token))
-            .call()?;
-
-        let status = resp.status();
-        let body: Value = resp.body_mut().read_json()?;
-
-        if !status.is_success() {
-            return Err(format!(
-                "DigitalOcean API returned HTTP {status} while looking up '{name}': {body}"
-            )
-            .into());
-        }
-
-        body["droplets"]
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|d| d["id"].as_u64())
-            .ok_or_else(|| format!("No droplet found with name '{name}'").into())
-    }
-
     /// Ensure `public_key` is registered in the account and return its
     /// fingerprint.  If the key already exists a list lookup is performed to
     /// find the matching fingerprint rather than attempting re-registration.
@@ -215,10 +188,9 @@ impl Provider for DigitalOceanProvider {
         Ok(body)
     }
 
-    /// Delete a Droplet by name.  Returns a synthetic JSON confirmation
+    /// Delete a Droplet by ID.  Returns a synthetic JSON confirmation
     /// because the DO DELETE endpoint returns 204 No Content on success.
-    fn destroy_vm(&self, instance_name: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        let id = self.get_droplet_id(instance_name)?;
+    fn destroy_vm(&self, id: &str) -> Result<Value, Box<dyn std::error::Error>> {
         let url = format!("https://api.digitalocean.com/v2/droplets/{id}");
 
         let agent = build_agent();
@@ -233,7 +205,6 @@ impl Provider for DigitalOceanProvider {
             return Ok(serde_json::json!({
                 "status": "deleted",
                 "id":     id,
-                "name":   instance_name,
             }));
         }
 
@@ -249,13 +220,10 @@ impl Provider for DigitalOceanProvider {
     ///                           falls back to public if no private exists.
     fn get_vm_ip(
         &self,
-        instance_name: &str,
+        id: &str,
         prefer_public: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let url = format!(
-            "https://api.digitalocean.com/v2/droplets?name={}",
-            instance_name
-        );
+        let url = format!("https://api.digitalocean.com/v2/droplets/{id}");
 
         let agent = build_agent();
         let mut resp = agent
@@ -268,19 +236,19 @@ impl Provider for DigitalOceanProvider {
 
         if !status.is_success() {
             return Err(format!(
-                "DigitalOcean API returned HTTP {status} while fetching '{instance_name}': {body}"
+                "DigitalOcean API returned HTTP {status} while fetching droplet '{id}': {body}"
             )
             .into());
         }
 
-        let droplet = body["droplets"]
-            .as_array()
-            .and_then(|a| a.first())
-            .ok_or_else(|| format!("No droplet found with name '{instance_name}'"))?;
+        let droplet = &body["droplet"];
+        if droplet.is_null() {
+            return Err(format!("No droplet found with id '{id}'").into());
+        }
 
         let networks = droplet["networks"]["v4"]
             .as_array()
-            .ok_or_else(|| format!("No v4 networks on droplet '{instance_name}'"))?;
+            .ok_or_else(|| format!("No v4 networks on droplet '{id}'"))?;
 
         let (primary, fallback) = if prefer_public {
             ("public", "private")
@@ -294,7 +262,7 @@ impl Provider for DigitalOceanProvider {
             .or_else(|| networks.iter().find(|n| n["type"] == fallback))
             .and_then(|n| n["ip_address"].as_str())
             .map(str::to_string)
-            .ok_or_else(|| format!("No IP address found for droplet '{instance_name}'").into())
+            .ok_or_else(|| format!("No IP address found for droplet '{id}'").into())
     }
 }
 
