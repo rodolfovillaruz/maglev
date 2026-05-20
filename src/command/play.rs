@@ -146,15 +146,7 @@ pub fn play_config(
         )
     };
 
-    let any_worker_needs_jump = worker_entries.iter().any(|(_, pp)| !pp) && jumphost_is_public;
-    let primary_cp_needs_jump = common.provisioner.is_some() && jumphost_is_public;
-
-    if any_worker_needs_jump {
-        println!(
-            "\n  ℹ  Some workers have private IPs. SSH to these nodes will be routed \
-             through {jumphost_name} ({jumphost_ip}) via ProxyJump."
-        );
-    }
+    let jumphost_accessible = common.provisioner.is_some() && jumphost_is_public;
 
     let cp_endpoint: String = match &first_cp_merged.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
@@ -226,7 +218,7 @@ pub fn play_config(
             primary_cp_name,
             &cp_endpoint,
             primary_cp_ip,
-            |cmd| match primary_cp_needs_jump {
+            |cmd| match jumphost_accessible {
                 true => ssh_capture_jump(
                     &jumphost_ip,
                     ssh_user,
@@ -237,7 +229,7 @@ pub fn play_config(
                 ),
                 false => ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd),
             },
-            |cmd| match primary_cp_needs_jump {
+            |cmd| match jumphost_accessible {
                 true => ssh_run_jump(
                     &jumphost_ip,
                     ssh_user,
@@ -250,7 +242,7 @@ pub fn play_config(
             },
         )?;
 
-        let already_init = if primary_cp_needs_jump {
+        let already_init = if jumphost_accessible {
             ssh_capture_jump(
                 &jumphost_ip,
                 ssh_user,
@@ -277,7 +269,7 @@ pub fn play_config(
                     ssh_user,
                     &ssh_priv_path,
                     &cp_endpoint,
-                    primary_cp_needs_jump,
+                    jumphost_accessible,
                     &jumphost_ip,
                 )?;
             }
@@ -286,7 +278,7 @@ pub fn play_config(
                 primary_cp_name,
                 ssh_user,
                 &ssh_priv_path,
-                primary_cp_needs_jump,
+                jumphost_accessible,
                 &jumphost_ip,
                 auto_approve,
             )?;
@@ -298,7 +290,7 @@ pub fn play_config(
                 &ssh_priv_path,
                 &cp_endpoint,
                 is_ha,
-                primary_cp_needs_jump,
+                jumphost_accessible,
                 &jumphost_ip,
                 auto_approve,
                 &cert_sans,
@@ -324,7 +316,7 @@ pub fn play_config(
             echo \"$BASE --control-plane --certificate-key $CERT_KEY\"";
 
         let cp_join_cmd = {
-            let cmd_result = if any_worker_needs_jump {
+            let cmd_result = if jumphost_accessible {
                 ssh_capture_jump(
                     &jumphost_ip,
                     ssh_user,
@@ -463,7 +455,7 @@ pub fn play_config(
         let cmd = "sudo openssl x509 -noout -fingerprint -sha256 \
                    -in /etc/kubernetes/pki/ca.crt 2>/dev/null \
                    | cut -d= -f2";
-        let result = if any_worker_needs_jump {
+        let result = if jumphost_accessible {
             ssh_capture_jump(
                 &jumphost_ip,
                 ssh_user,
@@ -499,7 +491,7 @@ pub fn play_config(
     };
 
     let worker_join_cmd = {
-        let cmd_result = if any_worker_needs_jump {
+        let cmd_result = if jumphost_accessible {
             ssh_capture_jump(
                 &jumphost_ip,
                 ssh_user,
@@ -686,7 +678,7 @@ pub fn play_config(
         primary_cp_ip,
         ssh_user,
         &ssh_priv_path,
-        any_worker_needs_jump,
+        jumphost_accessible,
         &jumphost_ip,
         auto_approve,
     )?;

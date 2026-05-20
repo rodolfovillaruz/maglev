@@ -132,7 +132,7 @@ pub fn approve_pending_csrs(
     cp_ip: &str,
     ssh_user: &str,
     ssh_priv_path: &str,
-    any_worker_needs_jump: bool,
+    jumphost_accessible: bool,
     jumphost_ip: &str,
     auto_approve: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -158,7 +158,7 @@ pub fn approve_pending_csrs(
          }}'"
     );
 
-    let raw = if any_worker_needs_jump {
+    let raw = if jumphost_accessible {
         ssh_capture_jump(
             jumphost_ip,
             ssh_user,
@@ -231,7 +231,7 @@ pub fn approve_pending_csrs(
     );
     println!("    $ {approve_cmd}");
 
-    let result = if any_worker_needs_jump {
+    let result = if jumphost_accessible {
         ssh_run_jump(
             jumphost_ip,
             ssh_user,
