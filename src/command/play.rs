@@ -277,7 +277,7 @@ pub fn play_config(
                     ssh_user,
                     &ssh_priv_path,
                     &cp_endpoint,
-                    any_worker_needs_jump,
+                    primary_cp_needs_jump,
                     &jumphost_ip,
                 )?;
             }
@@ -286,7 +286,7 @@ pub fn play_config(
                 primary_cp_name,
                 ssh_user,
                 &ssh_priv_path,
-                any_worker_needs_jump,
+                primary_cp_needs_jump,
                 &jumphost_ip,
                 auto_approve,
             )?;
@@ -298,7 +298,7 @@ pub fn play_config(
                 &ssh_priv_path,
                 &cp_endpoint,
                 is_ha,
-                any_worker_needs_jump,
+                primary_cp_needs_jump,
                 &jumphost_ip,
                 auto_approve,
                 &cert_sans,

@@ -12,7 +12,7 @@ pub fn provision_cilium(
     cp_name: &str,
     ssh_user: &str,
     ssh_priv_path: &str,
-    any_worker_needs_jump: bool,
+    primary_cp_needs_jump: bool,
     jumphost_ip: &str,
     auto_approve: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -34,7 +34,7 @@ pub fn provision_cilium(
          >/dev/null 2>&1 && echo installed || echo not_installed"
     );
 
-    let cilium_status = if any_worker_needs_jump {
+    let cilium_status = if primary_cp_needs_jump {
         ssh_capture_jump(
             jumphost_ip,
             ssh_user,
@@ -63,7 +63,7 @@ pub fn provision_cilium(
             return Ok(());
         }
 
-        let result = if any_worker_needs_jump {
+        let result = if primary_cp_needs_jump {
             ssh_run_jump(
                 jumphost_ip,
                 ssh_user,
@@ -82,7 +82,7 @@ pub fn provision_cilium(
                 eprintln!("  ⚠ cilium install failed ({e}) — retrying with sudo …");
                 let sudo_cmd = format!("sudo {cilium_install_cmd}");
                 println!("    $ {sudo_cmd}");
-                if any_worker_needs_jump {
+                if primary_cp_needs_jump {
                     ssh_run_jump(
                         jumphost_ip,
                         ssh_user,
@@ -111,7 +111,7 @@ pub fn provision_cilium(
         cp_ip,
         ssh_user,
         ssh_priv_path,
-        any_worker_needs_jump,
+        primary_cp_needs_jump,
         jumphost_ip,
         auto_approve,
     )?;
@@ -127,7 +127,7 @@ pub fn provision_cilium(
         return Ok(());
     }
 
-    let result = if any_worker_needs_jump {
+    let result = if primary_cp_needs_jump {
         ssh_run_jump(
             jumphost_ip,
             ssh_user,
@@ -146,7 +146,7 @@ pub fn provision_cilium(
             eprintln!("  ⚠ cilium status --wait failed ({e}) — retrying with sudo …");
             let sudo_cmd = format!("sudo {cilium_status_cmd}");
             println!("    $ {sudo_cmd}");
-            if any_worker_needs_jump {
+            if primary_cp_needs_jump {
                 ssh_run_jump(
                     jumphost_ip,
                     ssh_user,

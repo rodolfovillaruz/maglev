@@ -19,7 +19,7 @@ pub fn provision_control_plane_node(
     ssh_priv_path: &str,
     cp_endpoint: &str,
     is_ha: bool,
-    any_worker_needs_jump: bool,
+    primary_cp_needs_jump: bool,
     jumphost_ip: &str,
     auto_approve: bool,
     cert_sans: &[String],
@@ -78,7 +78,7 @@ pub fn provision_control_plane_node(
     let config_script = format!(
         "cat > /tmp/kubeadm-config.yaml <<'KUBEADM_CONFIG_EOF'\n{kubeadm_config}\nKUBEADM_CONFIG_EOF"
     );
-    if any_worker_needs_jump {
+    if primary_cp_needs_jump {
         ssh_run_jump(
             jumphost_ip,
             ssh_user,
@@ -107,7 +107,7 @@ pub fn provision_control_plane_node(
     }
 
     println!("\n  Running kubeadm init — this may take several minutes …\n");
-    if any_worker_needs_jump {
+    if primary_cp_needs_jump {
         ssh_run_jump(
             jumphost_ip,
             ssh_user,
@@ -126,7 +126,7 @@ pub fn provision_control_plane_node(
         cp_name,
         ssh_user,
         ssh_priv_path,
-        any_worker_needs_jump,
+        primary_cp_needs_jump,
         jumphost_ip,
         auto_approve,
     )
@@ -142,7 +142,7 @@ pub fn verify_control_plane_endpoint(
     ssh_user: &str,
     ssh_priv_path: &str,
     expected_endpoint: &str,
-    any_worker_needs_jump: bool,
+    primary_cp_needs_jump: bool,
     jumphost_ip: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Verifying controlPlaneEndpoint in kubeadm-config …");
@@ -152,7 +152,7 @@ pub fn verify_control_plane_endpoint(
         -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
         | grep 'controlPlaneEndpoint' || true";
 
-    let output = if any_worker_needs_jump {
+    let output = if primary_cp_needs_jump {
         ssh_capture_jump(
             jumphost_ip,
             ssh_user,
