@@ -7,6 +7,7 @@ use crate::expand_tilde;
 use crate::prompt_yes_no;
 use crate::provider::load_provider;
 use crate::rule::resolve_rules;
+use crate::state::State;
 use crate::structs::CommonMergedSpec;
 use crate::utils::approve_pending_csrs;
 use crate::utils::check_containerd_running;
@@ -43,6 +44,9 @@ pub fn play_config(
     loaded.describe();
 
     let resolved = resolve_rules(common)?;
+
+    // Load state so we can pass instance IDs to the provider instead of raw names
+    let state = State::load(config_path);
 
     let mut cp_entries: Vec<(String, bool)> = Vec::new();
     let mut worker_entries: Vec<(String, bool)> = Vec::new();
@@ -105,15 +109,20 @@ pub fn play_config(
     let fetch_ip_with_retry = |name: &str,
                                prefer_public: bool|
      -> Result<String, Box<dyn std::error::Error>> {
+        let identifier = state
+            .instances
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name);
         let max_attempts = 30; // 30 attempts * 2 seconds = 60 seconds timeout
         for _ in 0..max_attempts {
-            match provider.get_vm_ip(name, prefer_public) {
+            match provider.get_vm_ip(identifier, prefer_public) {
                 Ok(ip) if !ip.trim().is_empty() && ip.to_lowercase() != "null" => return Ok(ip),
                 _ => std::thread::sleep(std::time::Duration::from_secs(2)),
             }
         }
         // Final attempt that will safely bubble up the error if it's still missing
-        provider.get_vm_ip(name, prefer_public)
+        provider.get_vm_ip(identifier, prefer_public)
     };
 
     let cp_with_ips: Vec<(String, String)> = cp_entries
@@ -713,10 +722,15 @@ pub fn play_config(
     println!("\n✓ Cluster provisioning complete!");
     println!("\n  Verify from the primary control-plane:");
 
+    let primary_id = state
+        .instances
+        .get(primary_cp_name)
+        .map(|s| s.as_str())
+        .unwrap_or(primary_cp_name.as_str());
     let alt_ip = if primary_cp_prefer_public {
-        provider.get_vm_ip(primary_cp_name, false).ok()
+        provider.get_vm_ip(primary_id, false).ok()
     } else {
-        provider.get_vm_ip(primary_cp_name, true).ok()
+        provider.get_vm_ip(primary_id, true).ok()
     };
 
     let (primary_label, primary_ip_to_show, alt_label, alt_ip_to_show) = if primary_cp_prefer_public
