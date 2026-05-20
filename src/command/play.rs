@@ -99,12 +99,27 @@ pub fn play_config(
     let is_ha = cp_count >= 3;
     let primary_cp_prefer_public = cp_entries[0].1;
 
-    println!("\n  Fetching IPs …");
+    println!("\n  Fetching IPs (waiting for assignments if necessary) …");
+
+    // Helper to retry fetching the IP address, handling DigitalOcean's asynchronous IP assignment
+    let fetch_ip_with_retry = |name: &str,
+                               prefer_public: bool|
+     -> Result<String, Box<dyn std::error::Error>> {
+        let max_attempts = 30; // 30 attempts * 2 seconds = 60 seconds timeout
+        for _ in 0..max_attempts {
+            match provider.get_vm_ip(name, prefer_public) {
+                Ok(ip) if !ip.trim().is_empty() && ip.to_lowercase() != "null" => return Ok(ip),
+                _ => std::thread::sleep(std::time::Duration::from_secs(2)),
+            }
+        }
+        // Final attempt that will safely bubble up the error if it's still missing
+        provider.get_vm_ip(name, prefer_public)
+    };
 
     let cp_with_ips: Vec<(String, String)> = cp_entries
         .iter()
         .map(|(name, prefer_public)| {
-            let ip = provider.get_vm_ip(name, *prefer_public)?;
+            let ip = fetch_ip_with_retry(name, *prefer_public)?;
             println!(
                 "  {name:<30} →  {ip}  ({})",
                 if *prefer_public { "public" } else { "private" }
@@ -116,7 +131,7 @@ pub fn play_config(
     let worker_with_ips: Vec<(String, String)> = worker_entries
         .iter()
         .map(|(name, prefer_public)| {
-            let ip = provider.get_vm_ip(name, *prefer_public)?;
+            let ip = fetch_ip_with_retry(name, *prefer_public)?;
             println!(
                 "  {name:<30} →  {ip}  ({})",
                 if *prefer_public { "public" } else { "private" }
@@ -137,7 +152,8 @@ pub fn play_config(
             p.node, p.provisioner_type
         );
         let pref_pub = p.provisioner_type == "public";
-        let ip = provider.get_vm_ip(&p.node, pref_pub)?;
+        // Also use the retry logic for the provisioner jump-host
+        let ip = fetch_ip_with_retry(&p.node, pref_pub)?;
         println!("    IP: {ip}");
         (p.node.clone(), ip, pref_pub)
     } else {
