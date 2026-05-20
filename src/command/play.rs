@@ -10,6 +10,7 @@ use crate::rule::resolve_rules;
 use crate::structs::CommonMergedSpec;
 use crate::utils::approve_pending_csrs;
 use crate::utils::check_containerd_running;
+use crate::utils::wait_for_containerd;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +20,7 @@ use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 pub fn play_config(
     config_path: &str,
     auto_approve: bool,
+    no_wait: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // When --auto-approve is set every interactive gate is bypassed.
     let confirm = |question: &str| -> bool {
@@ -180,18 +182,28 @@ pub fn play_config(
         );
     }
 
-    // ── Preflight check — Ensure containerd is running ──────────────────────
+    // ── Preflight check ──────────────────────────────────────────────────────
     println!("\n━━ Preflight check — Verifying containerd on all nodes ━━━━━━━━━━━━━━");
+
+    let wait_or_check = |ip: &str,
+                         name: &str,
+                         needs_jump: bool|
+     -> Result<(), Box<dyn std::error::Error>> {
+        if no_wait {
+            check_containerd_running(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)
+        } else {
+            wait_for_containerd(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)
+        }
+    };
 
     println!("\n  Control-plane nodes:");
     for (name, ip) in &cp_with_ips {
         let needs_jump = cp_entries
             .iter()
             .find(|(n, _)| n == name)
-            .map(|(_, prefer_public)| !prefer_public && jumphost_is_public)
+            .map(|(_, pub_)| !pub_ && jumphost_is_public)
             .unwrap_or(false);
-
-        check_containerd_running(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)?;
+        wait_or_check(ip, name, needs_jump)?;
         println!("    ✓ {name}");
     }
 
@@ -200,10 +212,9 @@ pub fn play_config(
         let needs_jump = worker_entries
             .iter()
             .find(|(n, _)| n == name)
-            .map(|(_, prefer_public)| !prefer_public && jumphost_is_public)
+            .map(|(_, pub_)| !pub_ && jumphost_is_public)
             .unwrap_or(false);
-
-        check_containerd_running(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)?;
+        wait_or_check(ip, name, needs_jump)?;
         println!("    ✓ {name}");
     }
 

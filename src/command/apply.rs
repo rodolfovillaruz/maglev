@@ -1,3 +1,4 @@
+use crate::command::play::play_config;
 use crate::ip::IpAddressType;
 use crate::provider::load_provider;
 use crate::rule::resolve_rules;
@@ -7,7 +8,11 @@ use crate::utils::{prompt_yes_no, read_ssh_public_key};
 // `apply` subcommand
 // ---------------------------------------------------------------------------
 
-pub fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn apply_config(
+    config_path: &str,
+    play: bool,
+    auto_approve: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Apply ===\n");
     println!("Reading config: {config_path}");
 
@@ -79,5 +84,12 @@ pub fn apply_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
     }
 
     println!("\n✓ All {total} VM creation request(s) submitted successfully.");
+
+    if play {
+        println!("\n── --play flag set: handing off to play ────────────────────────────────");
+        // no_wait=false so the play step will poll until containerd is ready
+        play_config(config_path, auto_approve, false)?;
+    }
+
     Ok(())
 }

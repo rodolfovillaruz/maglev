@@ -34,38 +34,34 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
-
 #[derive(Subcommand)]
 enum Commands {
-    /// Create VM instances described by a provider YAML config
     Apply {
-        /// Path to the YAML config file (gcp.yaml or digitalocean.yaml)
         config: String,
-    },
-    /// Permanently delete VM instances described by a provider YAML config
-    Destroy {
-        /// Path to the YAML config file
-        config: String,
-    },
-    /// Provision Kubernetes on control-plane nodes and join workers
-    Play {
-        /// Path to the YAML config file
-        config: String,
-        /// Assume "yes" to every interactive prompt
+        /// Also run the play step after instances are created
+        #[arg(long, default_value_t = false)]
+        play: bool,
+        /// Assume "yes" to every interactive prompt (only meaningful with --play)
         #[arg(long, default_value_t = false)]
         auto_approve: bool,
     },
-    /// Reset kubeadm state on all nodes
+    Destroy {
+        config: String,
+    },
+    Play {
+        config: String,
+        #[arg(long, default_value_t = false)]
+        auto_approve: bool,
+        /// Skip waiting for containerd; fail immediately if it is not ready
+        #[arg(long, default_value_t = false)]
+        no_wait: bool,
+    },
     Reset {
-        /// Path to the YAML config file
         config: String,
     },
-    /// Restart (reboot) all nodes
     Restart {
-        /// Path to the YAML config file
         config: String,
     },
-    /// Run the interactive GCP credential builder
     Print,
 }
 
@@ -75,16 +71,19 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
-
     let cli = Cli::parse();
-
     match cli.command {
-        Commands::Apply { config } => apply_config(&config),
+        Commands::Apply {
+            config,
+            play,
+            auto_approve,
+        } => apply_config(&config, play, auto_approve),
         Commands::Destroy { config } => destroy_config(&config),
         Commands::Play {
             config,
             auto_approve,
-        } => play_config(&config, auto_approve),
+            no_wait,
+        } => play_config(&config, auto_approve, no_wait),
         Commands::Reset { config } => reset_config(&config),
         Commands::Restart { config } => restart_config(&config),
         Commands::Print => print_build_credential(),
