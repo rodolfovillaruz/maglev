@@ -1,6 +1,7 @@
 use crate::GenericsConfigYaml;
-use crate::spec::{MergedSpec, merge_spec_configs};
-use crate::yaml::CommonConfig;
+use crate::structs::CommonConfig;
+use crate::structs::MergedSpec;
+use crate::utils::merge_spec_configs;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------

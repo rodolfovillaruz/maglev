@@ -3,10 +3,9 @@ mod cp;
 mod ip;
 mod provider;
 mod rule;
-mod spec;
 mod ssh;
+mod structs;
 mod utils;
-mod yaml;
 
 use clap::{Parser, Subcommand};
 use command::apply::apply_config;
@@ -17,8 +16,8 @@ use command::restart::restart_config;
 use ip::IpAddressType;
 use provider::gcp::print_build_credential;
 use ssh::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
+use structs::{GenericsConfigYaml, SpecYaml};
 use utils::{expand_tilde, prompt_yes_no};
-use yaml::{GenericsConfigYaml, SpecYaml};
 
 // ---------------------------------------------------------------------------
 // CLI

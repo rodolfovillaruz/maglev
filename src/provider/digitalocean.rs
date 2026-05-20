@@ -1,5 +1,5 @@
 use crate::provider::Provider;
-use crate::yaml::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
+use crate::structs::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ use crate::expand_tilde;
 use crate::prompt_yes_no;
 use crate::provider::load_provider;
 use crate::rule::resolve_rules;
-use crate::spec::MergedSpec;
+use crate::structs::MergedSpec;
 use crate::utils::approve_pending_csrs;
 use crate::utils::check_containerd_running;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};

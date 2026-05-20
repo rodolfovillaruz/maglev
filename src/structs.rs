@@ -139,3 +139,29 @@ pub struct ApiServerConfigYaml {
     #[serde(rename = "certSANs", default)]
     pub cert_sans: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Spec merging
+// ---------------------------------------------------------------------------
+
+/// The fully resolved, non-optional view of a node's configuration produced
+/// by merging one or more [`SpecConfigYaml`] entries left-to-right.
+///
+/// Every field is required; `merge_spec_configs` returns an error when any
+/// mandatory field is absent after the merge pass.
+#[derive(Debug, Clone)]
+pub struct MergedSpec {
+    pub machine_type: String,
+    pub boot_disk_image: String,
+    pub boot_disk_size: u64,
+    /// Defaults to [`IpAddressType::Private`] when no spec sets it.
+    pub ip_address: IpAddressType,
+    pub ssh_public_key: String,
+    pub script: String,
+    pub user: String,
+    pub control_plane_endpoint: Option<String>,
+    /// Union of all `apiServer.certSANs` entries from every spec layer that
+    /// contributed to this node.  Order is preserved; duplicates are removed
+    /// on first-seen basis.  Empty when no spec defines certSANs.
+    pub cert_sans: Vec<String>,
+}

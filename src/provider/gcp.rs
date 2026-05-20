@@ -1,6 +1,6 @@
 use crate::provider::Provider;
+use crate::structs::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
 use crate::utils::prompt_yes_no;
-use crate::yaml::{GroupYaml, ProvisionerYaml, RuleYaml, SpecYaml};
 use std::io::{BufRead, Write, stdin, stdout};
 
 use serde::{Deserialize, Serialize};

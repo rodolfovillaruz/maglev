@@ -1,7 +1,7 @@
 use crate::provider::digitalocean::{DigitalOceanCredentials, DigitalOceanProvider, DoRoot};
 use crate::provider::gcp::{GcpCredentials, GcpProvider, GcpRoot};
+use crate::structs::{CommonConfig, ProvisionerYaml};
 use crate::utils::{expand_tilde, validate_specs};
-use crate::yaml::{CommonConfig, ProvisionerYaml};
 use std::fs;
 
 pub mod digitalocean;
