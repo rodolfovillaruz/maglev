@@ -181,5 +181,6 @@ pub struct CommonConfig {
     pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub provisioner: Option<ProvisionerYaml>,
+    #[allow(unused)]
     pub disks: Option<Vec<DiskYaml>>,
 }
