@@ -16,16 +16,6 @@ pub fn provision_cilium(
     jumphost_ip: &str,
     auto_approve: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // When --auto-approve is set every interactive gate is bypassed.
-    let confirm = |question: &str| -> bool {
-        if auto_approve {
-            println!("{question} [auto-approved]");
-            true
-        } else {
-            prompt_yes_no(question)
-        }
-    };
-
     // ── Step B: cilium install ────────────────────────────────────────────────
 
     // Check if Cilium is already installed
@@ -58,7 +48,7 @@ pub fn provision_cilium(
         println!("\n  → Step B: deploy Cilium CNI");
         println!("    $ {cilium_install_cmd}");
 
-        if !confirm("  Run cilium install?") {
+        if !prompt_yes_no("  Run cilium install?", auto_approve) {
             println!("  Skipped — Cilium CNI will not be deployed.");
             return Ok(());
         }
@@ -122,7 +112,7 @@ pub fn provision_cilium(
     println!("\n  → Step C: wait for Cilium to become ready");
     println!("    $ {cilium_status_cmd}");
 
-    if !confirm("  Run cilium status --wait?") {
+    if !prompt_yes_no("  Run cilium status --wait?", auto_approve) {
         println!("  Skipped — continuing without confirming Cilium health.");
         return Ok(());
     }

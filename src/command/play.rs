@@ -23,16 +23,6 @@ pub fn play_config(
     auto_approve: bool,
     no_wait: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // When --auto-approve is set every interactive gate is bypassed.
-    let confirm = |question: &str| -> bool {
-        if auto_approve {
-            println!("{question} [auto-approved]");
-            true
-        } else {
-            prompt_yes_no(question)
-        }
-    };
-
     println!("=== Maglev Play ===\n");
     println!("Reading config: {config_path}");
 
@@ -249,11 +239,15 @@ pub fn play_config(
     println!("\n━━ Step 1 / 3 — Primary control-plane init ({primary_cp_name}) ━━━━━━━━━━━━");
     println!("\n  [{primary_cp_name}]  ({primary_cp_ip})");
 
-    if confirm(&format!("  SSH-check and provision {primary_cp_name}?")) {
+    if prompt_yes_no(
+        &format!("  SSH-check and provision {primary_cp_name}?"),
+        auto_approve,
+    ) {
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
             primary_cp_ip,
+            auto_approve,
             |cmd| match jumphost_accessible {
                 true => ssh_capture_jump(
                     &jumphost_ip,
@@ -389,7 +383,10 @@ pub fn play_config(
         {
             println!("\n  [{}/{}] {name}  ({ip})", idx + 2, cp_with_ips.len());
 
-            if !confirm(&format!("  Check and join {name} as control-plane?")) {
+            if !prompt_yes_no(
+                &format!("  Check and join {name} as control-plane?"),
+                auto_approve,
+            ) {
                 println!("  Skipped.");
                 continue;
             }
@@ -404,6 +401,7 @@ pub fn play_config(
                 name,
                 &cp_endpoint,
                 primary_cp_ip,
+                auto_approve,
                 |cmd| match cp_needs_jump {
                     true => {
                         ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd)
@@ -452,7 +450,7 @@ pub fn play_config(
             }
 
             println!("  Join command: {cp_join_cmd}");
-            if confirm("  Run join command?") {
+            if prompt_yes_no("  Run join command?", auto_approve) {
                 println!("\n  Joining {name} as control-plane node …\n");
                 let join_full = format!("sudo {cp_join_cmd}");
                 let result = if cp_needs_jump {
@@ -571,7 +569,7 @@ pub fn play_config(
             println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
         }
 
-        if !confirm("  Check and join?") {
+        if !prompt_yes_no("  Check and join?", auto_approve) {
             println!("  Skipped.");
             continue;
         }
@@ -669,6 +667,7 @@ pub fn play_config(
             name,
             &cp_endpoint,
             primary_cp_ip,
+            auto_approve,
             |cmd| match worker_needs_jump {
                 true => ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
                 false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),

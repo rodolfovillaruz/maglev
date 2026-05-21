@@ -89,17 +89,22 @@ fn home_dir() -> Option<String> {
 // Interactive yes/no prompt
 // ---------------------------------------------------------------------------
 
-pub fn prompt_yes_no(question: &str) -> bool {
-    print!("{question} [y/N]: ");
-    stdout().flush().expect("Failed to flush stdout");
+pub fn prompt_yes_no(question: &str, auto_approve: bool) -> bool {
+    if auto_approve {
+        println!("{question} [auto-approved]");
+        true
+    } else {
+        print!("{question} [y/N]: ");
+        stdout().flush().expect("Failed to flush stdout");
 
-    let mut line = String::new();
-    stdin()
-        .lock()
-        .read_line(&mut line)
-        .expect("Failed to read input");
+        let mut line = String::new();
+        stdin()
+            .lock()
+            .read_line(&mut line)
+            .expect("Failed to read input");
 
-    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+        matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +147,7 @@ pub fn approve_pending_csrs(
             println!("{question} [auto-approved]");
             true
         } else {
-            prompt_yes_no(question)
+            prompt_yes_no(question, auto_approve)
         }
     };
 

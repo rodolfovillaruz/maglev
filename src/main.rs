@@ -48,6 +48,8 @@ enum Commands {
     },
     Destroy {
         config: String,
+        #[arg(long, default_value_t = false)]
+        auto_approve: bool,
     },
     Play {
         config: String,
@@ -59,9 +61,13 @@ enum Commands {
     },
     Reset {
         config: String,
+        #[arg(long, default_value_t = false)]
+        auto_approve: bool,
     },
     Restart {
         config: String,
+        #[arg(long, default_value_t = false)]
+        auto_approve: bool,
     },
     Print,
 }
@@ -79,14 +85,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             play,
             auto_approve,
         } => apply_config(&config, play, auto_approve),
-        Commands::Destroy { config } => destroy_config(&config),
+        Commands::Destroy {
+            config,
+            auto_approve,
+        } => destroy_config(&config, auto_approve),
         Commands::Play {
             config,
             auto_approve,
             no_wait,
         } => play_config(&config, auto_approve, no_wait),
-        Commands::Reset { config } => reset_config(&config),
-        Commands::Restart { config } => restart_config(&config),
+        Commands::Reset {
+            config,
+            auto_approve,
+        } => reset_config(&config, auto_approve),
+        Commands::Restart {
+            config,
+            auto_approve,
+        } => restart_config(&config, auto_approve),
         Commands::Print => print_build_credential(),
     }
 }

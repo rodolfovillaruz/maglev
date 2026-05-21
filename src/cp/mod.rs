@@ -101,7 +101,7 @@ pub fn provision_control_plane_node(
     println!("\n  → Step A: initialise the cluster with kubeadm");
     println!("    $ {kubeadm_init_cmd}");
 
-    if !prompt_yes_no("  Run kubeadm init?") {
+    if !prompt_yes_no("  Run kubeadm init?", auto_approve) {
         println!("  Skipped — aborting control-plane provisioning for {cp_name}.");
         return Ok(());
     }
@@ -232,6 +232,7 @@ pub fn ensure_cp_endpoint_resolves(
     node_name: &str,
     cp_endpoint: &str,
     fallback_ip: &str,
+    auto_approve: bool,
     capture: impl Fn(&str) -> Result<String, Box<dyn std::error::Error>>,
     run: impl Fn(&str) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -261,9 +262,10 @@ pub fn ensure_cp_endpoint_resolves(
                  maglev will update /etc/hosts to fix this."
             );
 
-            if prompt_yes_no(&format!(
-                "  Update '{host}' in /etc/hosts to {fallback_ip} on {node_name}?"
-            )) {
+            if prompt_yes_no(
+                &format!("  Update '{host}' in /etc/hosts to {fallback_ip} on {node_name}?"),
+                auto_approve,
+            ) {
                 run(&format!(
                     "sudo sed -i '/[[:space:]]{host}[[:space:]]*$/d' /etc/hosts && \
                      echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"
@@ -313,9 +315,10 @@ pub fn ensure_cp_endpoint_resolves(
              to /etc/hosts on this node right now (idempotent — skipped if already present)."
         );
 
-        if prompt_yes_no(&format!(
-            "  Add '{fallback_ip}  {host}' to /etc/hosts on {node_name}?"
-        )) {
+        if prompt_yes_no(
+            &format!("  Add '{fallback_ip}  {host}' to /etc/hosts on {node_name}?"),
+            auto_approve,
+        ) {
             run(&format!(
                 "grep -qF '{host}' /etc/hosts \
                  || echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts"

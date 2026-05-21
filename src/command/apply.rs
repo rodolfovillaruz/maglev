@@ -61,7 +61,7 @@ pub fn apply_config(
     } else {
         // Updated to respect auto_approve
         let prompt_msg = format!("\nProceed with creating {total_to_create} new VM instance(s)?");
-        if !auto_approve && !prompt_yes_no(&prompt_msg) {
+        if !auto_approve && !prompt_yes_no(&prompt_msg, auto_approve) {
             println!("Aborted.");
             return Ok(());
         }

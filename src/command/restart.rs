@@ -8,7 +8,10 @@ use crate::utils::{expand_tilde, prompt_yes_no};
 // `restart` subcommand
 // ---------------------------------------------------------------------------
 
-pub fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn restart_config(
+    config_path: &str,
+    auto_approve: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Restart ===\n");
     println!("Reading config: {config_path}");
 
@@ -67,7 +70,7 @@ pub fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error
     println!("\n  SSH user: {ssh_user}  private key: {ssh_priv_path}");
     println!("\n⚠  All nodes will be rebooted. Services will be temporarily unavailable.");
 
-    if !prompt_yes_no("\nProceed with restarting all nodes?") {
+    if !prompt_yes_no("\nProceed with restarting all nodes?", auto_approve) {
         println!("Aborted.");
         return Ok(());
     }
@@ -83,7 +86,7 @@ pub fn restart_config(config_path: &str) -> Result<(), Box<dyn std::error::Error
     for (idx, (name, ip, prefer_public)) in nodes_with_ips.iter().enumerate() {
         println!("\n  [{}/{}] {name}  ({ip})", idx + 1, nodes_with_ips.len());
 
-        if !prompt_yes_no(&format!("  Restart {name}?")) {
+        if !prompt_yes_no(&format!("  Restart {name}?"), auto_approve) {
             println!("  Skipped.");
             continue;
         }

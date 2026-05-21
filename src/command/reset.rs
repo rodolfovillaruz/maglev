@@ -8,7 +8,10 @@ use crate::utils::{expand_tilde, prompt_yes_no};
 // `reset` subcommand
 // ---------------------------------------------------------------------------
 
-pub fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn reset_config(
+    config_path: &str,
+    auto_approve: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Reset ===\n");
     println!("Reading config: {config_path}");
 
@@ -67,7 +70,7 @@ pub fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
     println!("\n  SSH user: {ssh_user}  private key: {ssh_priv_path}");
     println!("\n⚠  This will reset kubeadm state on all nodes. Any clusters will be destroyed.");
 
-    if !prompt_yes_no("\nProceed with kubeadm reset on all nodes?") {
+    if !prompt_yes_no("\nProceed with kubeadm reset on all nodes?", auto_approve) {
         println!("Aborted.");
         return Ok(());
     }
@@ -83,7 +86,7 @@ pub fn reset_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>>
     for (idx, (name, ip, prefer_public)) in nodes_with_ips.iter().enumerate() {
         println!("\n  [{}/{}] {name}  ({ip})", idx + 1, nodes_with_ips.len());
 
-        if !prompt_yes_no(&format!("  Reset {name}?")) {
+        if !prompt_yes_no(&format!("  Reset {name}?"), auto_approve) {
             println!("  Skipped.");
             continue;
         }

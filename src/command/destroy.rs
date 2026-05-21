@@ -6,7 +6,10 @@ use crate::utils::prompt_yes_no;
 // `destroy` subcommand
 // ---------------------------------------------------------------------------
 
-pub fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn destroy_config(
+    config_path: &str,
+    auto_approve: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Destroy ===\n");
     println!("Reading config: {config_path}");
 
@@ -35,7 +38,7 @@ pub fn destroy_config(config_path: &str) -> Result<(), Box<dyn std::error::Error
     println!("⚠  This action is IRREVERSIBLE. All {total} VM instance(s) and their boot");
     println!("   disks will be permanently deleted.");
 
-    if !prompt_yes_no("\nProceed with destroying all VM instances?") {
+    if !prompt_yes_no("\nProceed with destroying all VM instances?", auto_approve) {
         println!("Aborted — nothing was deleted.");
         return Ok(());
     }

@@ -386,11 +386,11 @@ pub fn print_build_credential() -> Result<(), Box<dyn std::error::Error>> {
         client_email: client_email.clone(),
     };
 
-    if prompt_yes_no("\nPrint the JSON file?") {
+    if prompt_yes_no("\nPrint the JSON file?", false) {
         println!("{}", serde_json::to_string_pretty(&credentials)?);
     }
 
-    if prompt_yes_no("\nSave credentials to file?") {
+    if prompt_yes_no("\nSave credentials to file?", false) {
         let filename = format!(
             "maglev-credentials-{}.json",
             client_email.split('@').next().unwrap_or("account")
@@ -439,7 +439,7 @@ fn load_maglev_private_key() -> Result<(String, String), Box<dyn std::error::Err
         fs::read_to_string(&key_path).map_err(|e| format!("Cannot read '{key_path}': {e}"))?
     } else {
         println!("  Key file does not exist at: {key_path}");
-        if !prompt_yes_no("  Generate and save a new RSA-2048 private key?") {
+        if !prompt_yes_no("  Generate and save a new RSA-2048 private key?", false) {
             eprintln!("  Aborted.");
             std::process::exit(1);
         }
