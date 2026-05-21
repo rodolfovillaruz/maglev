@@ -169,6 +169,7 @@ impl Provider for DigitalOceanProvider {
             "ssh_keys":  ssh_fingerprints,
             "user_data": startup_script,
             "tags":      ["maglev"],
+            "ipv6":      true,
         });
 
         let agent = build_agent();
