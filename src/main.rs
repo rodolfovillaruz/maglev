@@ -35,6 +35,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
+
 #[derive(Subcommand)]
 enum Commands {
     Apply {
@@ -45,6 +46,9 @@ enum Commands {
         /// Assume "yes" to every interactive prompt (only meaningful with --play)
         #[arg(long, default_value_t = false)]
         auto_approve: bool,
+        /// Force highly-available setup (useful for < 3 nodes)
+        #[arg(long, default_value_t = false)]
+        force_ha: bool,
     },
     Destroy {
         config: String,
@@ -58,6 +62,9 @@ enum Commands {
         /// Skip waiting for containerd; fail immediately if it is not ready
         #[arg(long, default_value_t = false)]
         no_wait: bool,
+        /// Force highly-available setup (useful for < 3 nodes)
+        #[arg(long, default_value_t = false)]
+        force_ha: bool,
     },
     Reset {
         config: String,
@@ -84,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config,
             play,
             auto_approve,
-        } => apply_config(&config, play, auto_approve),
+            force_ha,
+        } => apply_config(&config, play, auto_approve, force_ha),
         Commands::Destroy {
             config,
             auto_approve,
@@ -93,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config,
             auto_approve,
             no_wait,
-        } => play_config(&config, auto_approve, no_wait),
+            force_ha,
+        } => play_config(&config, auto_approve, no_wait, force_ha),
         Commands::Reset {
             config,
             auto_approve,

@@ -22,6 +22,7 @@ pub fn play_config(
     config_path: &str,
     auto_approve: bool,
     no_wait: bool,
+    force_ha: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Play ===\n");
     println!("Reading config: {config_path}");
@@ -77,11 +78,22 @@ pub fn play_config(
     if cp_count == 0 {
         return Err("No control-plane nodes found in config.".into());
     }
+
+    // Include the override flag
+    let is_ha = cp_count >= 3 || force_ha;
+
     if cp_count == 1 {
-        println!(
-            "\n  ℹ  INFO: Single control-plane node — this cluster will \
-             not be highly available."
-        );
+        if force_ha {
+            println!(
+                "\n  ℹ  INFO: Single control-plane node — but HA setup forced \
+                 via flag."
+            );
+        } else {
+            println!(
+                "\n  ℹ  INFO: Single control-plane node — this cluster will \
+                 not be highly available."
+            );
+        }
     } else if cp_count % 2 == 0 {
         eprintln!(
             "\n  ⚠  WARNING: Even number of control-plane nodes ({cp_count}) detected. \
@@ -90,7 +102,6 @@ pub fn play_config(
         );
     }
 
-    let is_ha = cp_count >= 3;
     let primary_cp_prefer_public = cp_entries[0].1;
 
     println!("\n  Fetching IPs (waiting for assignments if necessary) …");
@@ -474,9 +485,9 @@ pub fn play_config(
                 println!("  Skipped.");
             }
         }
-    } else if !is_ha {
+    } else if !is_ha || cp_with_ips.len() <= 1 {
         println!("\n━━ Step 2 / 3 — Additional control-plane nodes ━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("  Single-node cluster — no additional control-plane nodes to join.");
+        println!("  No additional control-plane nodes to join.");
     }
 
     // ── Step 3 / 3 — Join workers ─────────────────────────────────────────────
