@@ -65,7 +65,7 @@ pub fn ssh_run(
 }
 
 // ---------------------------------------------------------------------------
-// SSH helpers — via ProxyJump (jump_host → target)
+// SSH helpers — via ProxyCommand (jump_host → target)
 // ---------------------------------------------------------------------------
 
 pub fn ssh_capture_jump(
@@ -76,6 +76,13 @@ pub fn ssh_capture_jump(
     private_key_path: &str,
     command: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // Explicitly pass the bypass flags and key to the jump host connection.
+    // Note: We wrap the private_key_path in single quotes in case it contains spaces.
+    let proxy_cmd = format!(
+        "ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i '{}' {}@{}",
+        private_key_path, jump_user, jump_ip
+    );
+
     let out = std::process::Command::new("ssh")
         .args([
             "-i",
@@ -85,11 +92,13 @@ pub fn ssh_capture_jump(
             "-o",
             "UserKnownHostsFile=/dev/null",
             "-o",
+            "BatchMode=yes",
+            "-o",
             "ConnectTimeout=15",
             "-o",
             "LogLevel=ERROR",
             "-o",
-            &format!("ProxyJump={jump_user}@{jump_ip}"),
+            &format!("ProxyCommand={proxy_cmd}"),
             &format!("{target_user}@{target_ip}"),
             command,
         ])
@@ -115,6 +124,11 @@ pub fn ssh_run_jump(
     private_key_path: &str,
     command: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let proxy_cmd = format!(
+        "ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i '{}' {}@{}",
+        private_key_path, jump_user, jump_ip
+    );
+
     let status = std::process::Command::new("ssh")
         .args([
             "-i",
@@ -124,12 +138,14 @@ pub fn ssh_run_jump(
             "-o",
             "UserKnownHostsFile=/dev/null",
             "-o",
+            "BatchMode=yes",
+            "-o",
             "ConnectTimeout=30",
             "-o",
             "LogLevel=ERROR",
             "-t",
             "-o",
-            &format!("ProxyJump={jump_user}@{jump_ip}"),
+            &format!("ProxyCommand={proxy_cmd}"),
             &format!("{target_user}@{target_ip}"),
             command,
         ])
