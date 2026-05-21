@@ -60,7 +60,11 @@ pub fn provision_control_plane_node(
              ---\n\
              apiVersion: kubelet.config.k8s.io/v1beta1\n\
              kind: KubeletConfiguration\n\
-             serverTLSBootstrap: true\n"
+             serverTLSBootstrap: true\n\
+             ---\n\
+             apiVersion: kubeproxy.config.k8s.io/v1alpha1\n\
+             kind: KubeProxyConfiguration\n\
+             bindAddress: \"::\"\n"
         )
     } else {
         format!(
@@ -70,7 +74,11 @@ pub fn provision_control_plane_node(
              ---\n\
              apiVersion: kubelet.config.k8s.io/v1beta1\n\
              kind: KubeletConfiguration\n\
-             serverTLSBootstrap: true\n"
+             serverTLSBootstrap: true\n\
+             ---\n\
+             apiVersion: kubeproxy.config.k8s.io/v1alpha1\n\
+             kind: KubeProxyConfiguration\n\
+             bindAddress: \"::\"\n"
         )
     };
 
