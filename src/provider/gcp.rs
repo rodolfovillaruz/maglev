@@ -528,7 +528,7 @@ fn generate_rsa_private_key_pem() -> Result<String, Box<dyn std::error::Error>> 
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct GcpYaml {
-    pub group: Vec<GroupYaml>,
+    pub groups: Vec<GroupYaml>,
     pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub credentials: GcpCredentialsYaml,

@@ -134,7 +134,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
 
         Ok(LoadedProvider::Gcp {
             common: CommonConfig {
-                groups: yaml.group,
+                groups: yaml.groups,
                 generics: yaml.generics,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,
@@ -162,7 +162,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
 
         Ok(LoadedProvider::DigitalOcean {
             common: CommonConfig {
-                groups: yaml.group,
+                groups: yaml.groups,
                 generics: yaml.generics,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,

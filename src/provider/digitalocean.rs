@@ -328,7 +328,7 @@ pub struct DoCredentialsYaml {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct DoYaml {
-    pub group: Vec<GroupYaml>,
+    pub groups: Vec<GroupYaml>,
     pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub credentials: DoCredentialsYaml,
