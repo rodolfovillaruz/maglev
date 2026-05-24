@@ -1,0 +1,8 @@
+[package]
+name = "mapper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walkdir = "2.4"
+syn = { version = "2.0", features = ["full", "visit"] }

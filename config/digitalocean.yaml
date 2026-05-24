@@ -18,6 +18,13 @@ digitalocean:
     - maglev-worker-gamma
     - maglev-worker-delta
     - maglev-worker-epsilon
+  disks:
+  - name: maglev-disk-worker-alpha
+    node: maglev-worker-alpha
+    size: 100
+  - name: maglev-disk-worker-beta
+    node: maglev-worker-beta
+    size: 100
   generics:
   - name: cisak
     config:
