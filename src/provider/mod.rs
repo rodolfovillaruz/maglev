@@ -101,6 +101,22 @@ pub trait Provider {
         instance_name: &str,
         prefer_public: bool,
     ) -> Result<String, Box<dyn std::error::Error>>;
+
+    fn create_disk(
+        &self,
+        _disk_name: &str,
+        _size_gb: u64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Err("Disk creation is not implemented for this provider".into())
+    }
+
+    fn attach_disk(
+        &self,
+        _disk_id: &str,
+        _instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Err("Disk attachment is not implemented for this provider".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +182,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
                 generics: yaml.generics,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,
-                disks: None,
+                disks: yaml.disks,
             },
             location,
             provisioner,

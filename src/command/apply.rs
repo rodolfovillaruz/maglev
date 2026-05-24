@@ -135,6 +135,72 @@ pub fn apply_config(
 
     println!("\n✓ {created_count} VM creation request(s) submitted successfully.");
 
+    // 5. Provision and Attach Disks
+    if let Some(disks) = &common.disks {
+        if !disks.is_empty() {
+            println!(
+                "\n── Disks to create & attach ──────────────────────────────────────────────"
+            );
+            let mut total_disks = 0usize;
+            for disk in disks {
+                if let Some(disk_id) = state.disks.get(&disk.name) {
+                    println!(
+                        "  • {} (Skipping: Already exists in state with ID: {})",
+                        disk.name, disk_id
+                    );
+                } else {
+                    println!(
+                        "  • {} (Size: {}GB, Target Node: {})",
+                        disk.name, disk.size, disk.node
+                    );
+                    total_disks += 1;
+                }
+            }
+
+            if total_disks > 0 {
+                let prompt_msg =
+                    format!("\nProceed with creating and attaching {total_disks} new disk(s)?");
+                if !auto_approve && !prompt_yes_no(&prompt_msg, auto_approve) {
+                    println!("Skipping disk creation.");
+                } else {
+                    let mut created_disks = 0usize;
+                    for disk in disks {
+                        if state.disks.contains_key(&disk.name) {
+                            continue;
+                        }
+
+                        // Create
+                        println!("\nCreating disk \"{}\"...", disk.name);
+                        let disk_id = provider.create_disk(&disk.name, disk.size)?;
+                        println!("Disk \"{}\" created with ID: {}", disk.name, disk_id);
+
+                        state.disks.insert(disk.name.clone(), disk_id.clone());
+                        state.save(config_path)?;
+                        created_disks += 1;
+
+                        // Attach
+                        if let Some(instance_id) = state.instances.get(&disk.node) {
+                            println!(
+                                "Attaching disk \"{}\" to node \"{}\"...",
+                                disk.name, disk.node
+                            );
+                            provider.attach_disk(&disk_id, instance_id)?;
+                            println!("Successfully requested attach for \"{}\".", disk.name);
+                        } else {
+                            println!(
+                                "⚠ Cannot attach disk \"{}\": Target node \"{}\" not found in state.",
+                                disk.name, disk.node
+                            );
+                        }
+                    }
+                    println!("\n✓ {created_disks} disk(s) created and attachment requested.");
+                }
+            } else {
+                println!("\nAll disks are already present in the state file.");
+            }
+        }
+    }
+
     if play {
         println!("\n── --play flag set: handing off to play ────────────────────────────────");
         // Pass force_ha down to play_config

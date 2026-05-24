@@ -1,4 +1,5 @@
 use crate::provider::Provider;
+use crate::structs::DiskYaml;
 use crate::structs::{GenericsYaml, GroupYaml, ProvisionerYaml, RuleYaml};
 use serde_json::Value;
 
@@ -265,6 +266,76 @@ impl Provider for DigitalOceanProvider {
             .map(str::to_string)
             .ok_or_else(|| format!("No IP address found for droplet '{id}'").into())
     }
+
+    fn create_disk(
+        &self,
+        disk_name: &str,
+        size_gb: u64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let request_body = serde_json::json!({
+            "name": disk_name,
+            "size_gigabytes": size_gb,
+            "region": self.region,
+        });
+
+        let agent = build_agent();
+        let mut resp = agent
+            .post("https://api.digitalocean.com/v2/volumes")
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send_json(request_body)?;
+
+        let status = resp.status();
+        let body: Value = resp.body_mut().read_json()?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "DigitalOcean API returned HTTP {status} creating disk '{disk_name}': {body}"
+            )
+            .into());
+        }
+
+        body["volume"]["id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "Missing volume id in DigitalOcean response".into())
+    }
+
+    fn attach_disk(
+        &self,
+        disk_id: &str,
+        instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // DO droplet_id requires a numeric value payload
+        let droplet_id: u64 = instance_id.parse().map_err(|_| {
+            format!("Instance ID '{instance_id}' is not a valid numeric DO Droplet ID")
+        })?;
+
+        let request_body = serde_json::json!({
+            "type": "attach",
+            "droplet_id": droplet_id,
+        });
+
+        let url = format!("https://api.digitalocean.com/v2/volumes/{disk_id}/actions");
+        let agent = build_agent();
+        let mut resp = agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send_json(request_body)?;
+
+        let status = resp.status();
+
+        if !status.is_success() {
+            let body: Value = resp.body_mut().read_json()?;
+            return Err(format!(
+                "DigitalOcean API returned HTTP {status} attaching disk '{disk_id}': {body}"
+            )
+            .into());
+        }
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,4 +405,7 @@ pub struct DoYaml {
     pub credentials: DoCredentialsYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioner: Option<ProvisionerYaml>,
+    // Add disks field to DigitalOcean YAML parser
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disks: Option<Vec<DiskYaml>>,
 }

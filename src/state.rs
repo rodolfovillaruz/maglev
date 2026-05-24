@@ -6,6 +6,9 @@ use std::path::Path;
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct State {
     pub instances: HashMap<String, String>,
+    // Add default tracking for disks without breaking backwards compatibility
+    #[serde(default)]
+    pub disks: HashMap<String, String>,
 }
 
 impl State {

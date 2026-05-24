@@ -157,9 +157,9 @@ pub struct CommonMergedSpec {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DiskYaml {
     pub name: String,
+    pub node: String,
     /// Disk capacity in Gigabytes.
-    #[serde(rename = "size-gb")]
-    pub size_gb: u64,
+    pub size: u64,
     /// Target mount path (e.g., `/mnt/data`).
     #[serde(
         rename = "mount-path",
