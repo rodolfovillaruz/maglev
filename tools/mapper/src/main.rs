@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use syn::visit::Visit;
-use syn::{ItemEnum, ItemFn, ItemImpl, ItemStruct, ItemTrait};
+use syn::{ItemEnum, ItemFn, ItemImpl, ItemStruct, ItemTrait, ItemUse};
 use walkdir::WalkDir;
 
 /// Holds the mapped data for a single function or method
@@ -14,6 +14,7 @@ struct FuncMap {
 /// Holds the mapped data for a single file
 #[derive(Default, Debug)]
 struct FileMap {
+    imports: Vec<String>,
     structs: Vec<String>,
     enums: Vec<String>,
     traits: Vec<String>,
@@ -97,7 +98,49 @@ impl MapVisitor {
 }
 
 // Implement the Syn Visitor trait to extract specific items
+fn format_vis(vis: &syn::Visibility) -> String {
+    match vis {
+        syn::Visibility::Public(_) => "pub ".to_string(),
+        syn::Visibility::Restricted(r) => {
+            let path_segments: Vec<String> = r
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            let path_str = path_segments.join("::");
+            let in_str = if r.in_token.is_some() { "in " } else { "" };
+            format!("pub({}{}) ", in_str, path_str)
+        }
+        syn::Visibility::Inherited => "".to_string(),
+    }
+}
+
+fn format_use_tree(tree: &syn::UseTree) -> String {
+    match tree {
+        syn::UseTree::Path(p) => format!("{}::{}", p.ident, format_use_tree(&p.tree)),
+        syn::UseTree::Name(n) => n.ident.to_string(),
+        syn::UseTree::Rename(r) => format!("{} as {}", r.ident, r.rename),
+        syn::UseTree::Glob(_) => "*".to_string(),
+        syn::UseTree::Group(g) => {
+            let items: Vec<String> = g.items.iter().map(format_use_tree).collect();
+            format!("{{{}}}", items.join(", "))
+        }
+    }
+}
+
+// Implement the Syn Visitor trait to extract specific items
 impl<'ast> Visit<'ast> for MapVisitor {
+    fn visit_item_use(&mut self, i: &'ast ItemUse) {
+        let vis_str = format_vis(&i.vis);
+        let prefix = if i.leading_colon.is_some() { "::" } else { "" };
+        let tree_str = format_use_tree(&i.tree);
+        self.map
+            .imports
+            .push(format!("{}use {}{};", vis_str, prefix, tree_str));
+        syn::visit::visit_item_use(self, i);
+    }
+
     fn visit_item_struct(&mut self, i: &'ast ItemStruct) {
         self.map.structs.push(i.ident.to_string());
         syn::visit::visit_item_struct(self, i);
@@ -204,7 +247,8 @@ fn process_file(path: &Path) -> Option<FileMap> {
 }
 
 fn print_map(path: &Path, map: FileMap) {
-    if map.structs.is_empty()
+    if map.imports.is_empty()
+        && map.structs.is_empty()
         && map.enums.is_empty()
         && map.traits.is_empty()
         && map.functions.is_empty()
@@ -215,6 +259,12 @@ fn print_map(path: &Path, map: FileMap) {
 
     println!("\n📄 {}", path.display());
 
+    if !map.imports.is_empty() {
+        println!("  📥 Imports:");
+        for i in map.imports {
+            println!("     - {}", i);
+        }
+    }
     if !map.structs.is_empty() {
         println!("  📦 Structs:");
         for s in map.structs {
