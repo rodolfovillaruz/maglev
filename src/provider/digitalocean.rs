@@ -336,6 +336,29 @@ impl Provider for DigitalOceanProvider {
 
         Ok(())
     }
+
+    fn destroy_disk(&self, disk_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!("https://api.digitalocean.com/v2/volumes/{disk_id}");
+
+        let agent = build_agent();
+        let mut resp = agent
+            .delete(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()?;
+
+        let status = resp.status();
+
+        // DigitalOcean returns 204 No Content for a successful deletion
+        if status.as_u16() == 204 {
+            return Ok(());
+        }
+
+        let body: Value = resp.body_mut().read_json()?;
+        Err(
+            format!("DigitalOcean API returned HTTP {status} deleting disk '{disk_id}': {body}")
+                .into(),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

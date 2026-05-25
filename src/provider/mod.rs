@@ -117,6 +117,11 @@ pub trait Provider {
     ) -> Result<(), Box<dyn std::error::Error>> {
         Err("Disk attachment is not implemented for this provider".into())
     }
+
+    // ADD THIS METHOD
+    fn destroy_disk(&self, _disk_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        Err("Disk destruction is not implemented for this provider".into())
+    }
 }
 
 // ---------------------------------------------------------------------------

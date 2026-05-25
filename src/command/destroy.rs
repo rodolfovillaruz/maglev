@@ -16,8 +16,7 @@ pub fn destroy_config(
     let loaded = load_provider(config_path)?;
     let common = loaded.common();
 
-    // 1. Load the state to retrieve instance IDs.
-    // DigitalOcean requires the Droplet ID (stored in state) disguised as the name to destroy.
+    // 1. Load the state to retrieve instance and disk IDs.
     let mut state = State::load(config_path);
 
     println!("\n── Provider settings ────────────────────────────────────────────────────");
@@ -33,21 +32,25 @@ pub fn destroy_config(
         }
     }
 
-    let total = all_nodes.len();
-    println!();
-    println!("⚠  This action is IRREVERSIBLE. All {total} VM instance(s) and their boot");
-    println!("   disks will be permanently deleted.");
+    let total_vms = all_nodes.len();
+    let total_disks = state.disks.len();
 
-    if !prompt_yes_no("\nProceed with destroying all VM instances?", auto_approve) {
+    println!();
+    println!("⚠  This action is IRREVERSIBLE. {total_vms} VM instance(s) and {total_disks}");
+    println!("   attached disk(s) will be permanently deleted.");
+
+    if !prompt_yes_no(
+        "\nProceed with destroying all VM instances and disks?",
+        auto_approve,
+    ) {
         println!("Aborted — nothing was deleted.");
         return Ok(());
     }
 
     let provider = loaded.provider();
 
+    // 2. Destroy VMs first (This implicitly detaches disks in most cloud providers)
     for (group_name, group_type, node) in &all_nodes {
-        // Look up the ID in the state file. If present, pass it as the target.
-        // Otherwise, fallback to the original node name (e.g., for GCP which doesn't use state IDs).
         let target = match state.instances.get(*node) {
             Some(id) => id.as_str(),
             None => *node,
@@ -59,7 +62,6 @@ pub fn destroy_config(
                 state.instances.remove(*node);
             }
             Err(e) => {
-                // Gracefully handle 404 Not Found (already deleted)
                 if e.to_string().contains("404") {
                     println!("\n[{group_type}/{group_name}] {node} not found (already deleted)");
                     state.instances.remove(*node);
@@ -70,7 +72,32 @@ pub fn destroy_config(
         }
     }
 
-    // 2. Save updated state (removing destroyed instances) so apply works cleanly next time
+    // 3. Destroy Disks tracked in state
+    if !state.disks.is_empty() {
+        println!("\n── Disks to destroy ─────────────────────────────────────────────────────");
+
+        // Clone into a separate collection so we can mutate `state.disks` during iteration
+        let disks_to_delete: Vec<(String, String)> = state.disks.clone().into_iter().collect();
+
+        for (disk_name, disk_id) in disks_to_delete {
+            match provider.destroy_disk(&disk_id) {
+                Ok(_) => {
+                    println!("  [Disk] {disk_name} deleted");
+                    state.disks.remove(&disk_name);
+                }
+                Err(e) => {
+                    if e.to_string().contains("404") {
+                        println!("  [Disk] {disk_name} not found (already deleted)");
+                        state.disks.remove(&disk_name);
+                    } else {
+                        eprintln!("  ✗ Failed to delete disk {disk_name}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Save updated state (removing destroyed instances & disks)
     if let Err(e) = state.save(config_path) {
         eprintln!("\n⚠ Failed to save state file updates: {e}");
     }
