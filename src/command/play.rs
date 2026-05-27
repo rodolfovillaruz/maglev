@@ -211,38 +211,99 @@ pub fn play_config(
     // ── Preflight check ──────────────────────────────────────────────────────
     println!("\n━━ Preflight check — Verifying containerd on all nodes ━━━━━━━━━━━━━━");
 
-    let wait_or_check = |ip: &str,
-                         name: &str,
-                         needs_jump: bool|
-     -> Result<(), Box<dyn std::error::Error>> {
-        if no_wait {
-            check_containerd_running(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)
-        } else {
-            wait_for_containerd(ip, name, ssh_user, &ssh_priv_path, needs_jump, &jumphost_ip)
+    let ssh_user_ref = ssh_user.as_str();
+    let ssh_priv_path_ref = ssh_priv_path.as_str();
+    let jumphost_ip_ref = jumphost_ip.as_str();
+
+    std::thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
+        let mut cp_handles = Vec::new();
+        for (name, ip) in &cp_with_ips {
+            let needs_jump = cp_entries
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, pub_)| !pub_ && jumphost_is_public)
+                .unwrap_or(false);
+            cp_handles.push((
+                name,
+                s.spawn(move || {
+                    let res = if no_wait {
+                        check_containerd_running(
+                            ip.as_str(),
+                            name.as_str(),
+                            ssh_user_ref,
+                            ssh_priv_path_ref,
+                            needs_jump,
+                            jumphost_ip_ref,
+                        )
+                    } else {
+                        wait_for_containerd(
+                            ip.as_str(),
+                            name.as_str(),
+                            ssh_user_ref,
+                            ssh_priv_path_ref,
+                            needs_jump,
+                            jumphost_ip_ref,
+                        )
+                    };
+                    res.map_err(|e| format!("Node {name}: {e}"))
+                }),
+            ));
         }
-    };
 
-    println!("\n  Control-plane nodes:");
-    for (name, ip) in &cp_with_ips {
-        let needs_jump = cp_entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, pub_)| !pub_ && jumphost_is_public)
-            .unwrap_or(false);
-        wait_or_check(ip, name, needs_jump)?;
-        println!("    ✓ {name}");
-    }
+        let mut worker_handles = Vec::new();
+        for (name, ip) in &worker_with_ips {
+            let needs_jump = worker_entries
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, pub_)| !pub_ && jumphost_is_public)
+                .unwrap_or(false);
+            worker_handles.push((
+                name,
+                s.spawn(move || {
+                    let res = if no_wait {
+                        check_containerd_running(
+                            ip.as_str(),
+                            name.as_str(),
+                            ssh_user_ref,
+                            ssh_priv_path_ref,
+                            needs_jump,
+                            jumphost_ip_ref,
+                        )
+                    } else {
+                        wait_for_containerd(
+                            ip.as_str(),
+                            name.as_str(),
+                            ssh_user_ref,
+                            ssh_priv_path_ref,
+                            needs_jump,
+                            jumphost_ip_ref,
+                        )
+                    };
+                    res.map_err(|e| format!("Node {name}: {e}"))
+                }),
+            ));
+        }
 
-    println!("\n  Worker nodes:");
-    for (name, ip) in &worker_with_ips {
-        let needs_jump = worker_entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, pub_)| !pub_ && jumphost_is_public)
-            .unwrap_or(false);
-        wait_or_check(ip, name, needs_jump)?;
-        println!("    ✓ {name}");
-    }
+        println!("\n  Control-plane nodes:");
+        for (name, handle) in cp_handles {
+            handle
+                .join()
+                .unwrap()
+                .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+            println!("    ✓ {name}");
+        }
+
+        println!("\n  Worker nodes:");
+        for (name, handle) in worker_handles {
+            handle
+                .join()
+                .unwrap()
+                .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+            println!("    ✓ {name}");
+        }
+
+        Ok(())
+    })?;
 
     println!("\n  ✓ All nodes ready for provisioning.\n");
 
