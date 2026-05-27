@@ -1,9 +1,11 @@
 use crate::command::play::play_config;
+use crate::cp::ADMIN_KUBECONFIG;
 use crate::ip::IpAddressType;
 use crate::provider::{LoadedProvider, load_provider};
 use crate::rule::resolve_rules;
+use crate::ssh::{ssh_capture, ssh_run};
 use crate::state::State;
-use crate::utils::{prompt_yes_no, read_ssh_public_key};
+use crate::utils::{expand_tilde, prompt_yes_no, read_ssh_public_key};
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -171,7 +173,77 @@ pub fn apply_config(
     // 3. Destroy instances
     if !instances_to_delete.is_empty() {
         println!("\n── Destroying Instances ─────────────────────────────────────────────────");
+
+        // Look up provisioner details for Kubernetes node validation and deletion
+        let mut provisioner_ip = String::new();
+        let mut provisioner_user = String::new();
+        let mut provisioner_priv_key = String::new();
+
+        if let Some(prov) = &common.provisioner {
+            for r in &resolved {
+                if r.nodes.contains(&prov.node) {
+                    let prefer_public = prov.provisioner_type == "public";
+                    let target = match &loaded {
+                        LoadedProvider::Gcp { .. } => prov.node.as_str(),
+                        LoadedProvider::DigitalOcean { .. } => state
+                            .instances
+                            .get(&prov.node)
+                            .map(|s| s.as_str())
+                            .unwrap_or(prov.node.as_str()),
+                    };
+
+                    if let Ok(ip) = provider.get_vm_ip(target, prefer_public) {
+                        provisioner_ip = ip;
+                    }
+                    provisioner_user = r.merged.user.clone();
+                    provisioner_priv_key =
+                        expand_tilde(&r.merged.ssh_public_key.replace(".pub", ""));
+                    break;
+                }
+            }
+        }
+
         for node in &instances_to_delete {
+            // Check if node is under the same certificate keys of the provisioner
+            if !provisioner_ip.is_empty() {
+                println!(
+                    "Verifying if node \"{node}\" is under the provisioner's certificate keys..."
+                );
+                let check_cmd = format!(
+                    "kubectl --kubeconfig {} get node {}",
+                    ADMIN_KUBECONFIG, node
+                );
+
+                match ssh_capture(
+                    &provisioner_ip,
+                    &provisioner_user,
+                    &provisioner_priv_key,
+                    &check_cmd,
+                ) {
+                    Ok(_) => {
+                        println!("  ✓ Node \"{node}\" matched. Executing kubectl delete node...");
+                        let del_cmd = format!(
+                            "kubectl --kubeconfig {} delete node {}",
+                            ADMIN_KUBECONFIG, node
+                        );
+                        if let Err(e) = ssh_run(
+                            &provisioner_ip,
+                            &provisioner_user,
+                            &provisioner_priv_key,
+                            &del_cmd,
+                        ) {
+                            eprintln!(
+                                "  ⚠ Failed to delete node \"{node}\" from Kubernetes: {}",
+                                e
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        return Err(format!("Node \"{node}\" is not under the same certificate keys of the provisioner (not found in cluster). Aborting.").into());
+                    }
+                }
+            }
+
             let id = state.instances.get(node).unwrap();
 
             // GCP expects the instance name; DigitalOcean expects the droplet ID
