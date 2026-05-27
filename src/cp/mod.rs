@@ -45,15 +45,19 @@ pub fn provision_control_plane_node(
             .join("\n");
         format!("apiServer:\n  certSANs:\n{items}\n")
     };
-
     // ── Step A: kubeadm init ──────────────────────────────────────────────────
-    // Create kubeadm config with serverTLSBootstrap enabled.
+    // Create kubeadm config with serverTLSBootstrap enabled and kube-proxy disabled.
     //
-    // ClusterConfiguration reference:
+    // Configuration reference:
     //   https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta4/
     let kubeadm_config = if is_ha {
         format!(
             "apiVersion: kubeadm.k8s.io/v1beta4\n\
+             kind: InitConfiguration\n\
+             skipPhases:\n\
+               - addon/kube-proxy\n\
+             ---\n\
+             apiVersion: kubeadm.k8s.io/v1beta4\n\
              kind: ClusterConfiguration\n\
              controlPlaneEndpoint: {cp_endpoint}\n\
              {api_server_block}\
@@ -65,6 +69,11 @@ pub fn provision_control_plane_node(
     } else {
         format!(
             "apiVersion: kubeadm.k8s.io/v1beta4\n\
+             kind: InitConfiguration\n\
+             skipPhases:\n\
+               - addon/kube-proxy\n\
+             ---\n\
+             apiVersion: kubeadm.k8s.io/v1beta4\n\
              kind: ClusterConfiguration\n\
              {api_server_block}\
              ---\n\
