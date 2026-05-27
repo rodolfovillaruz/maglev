@@ -60,8 +60,6 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         auto_approve: bool,
         /// Skip waiting for containerd; fail immediately if it is not ready
-        #[arg(long, default_value_t = false)]
-        no_wait: bool,
         /// Force highly-available setup (useful for < 3 nodes)
         #[arg(long, default_value_t = false)]
         force_ha: bool,
@@ -100,9 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Play {
             config,
             auto_approve,
-            no_wait,
             force_ha,
-        } => play_config(&config, auto_approve, no_wait, force_ha),
+        } => play_config(&config, auto_approve, force_ha),
         Commands::Reset {
             config,
             auto_approve,

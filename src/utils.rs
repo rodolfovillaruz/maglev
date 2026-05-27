@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::read_to_string;
 use std::io::{BufRead, Write, stdin, stdout};
-use std::{thread, time::Duration};
 
 // ---------------------------------------------------------------------------
 // Custom YAML deserializer: scalar string  OR  sequence of strings
@@ -261,49 +260,6 @@ pub fn approve_pending_csrs(
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Helper: Check containerd status
-// ─────────────────────────────────────────────────────────────────────────
-
-pub fn check_containerd_running(
-    ip: &str,
-    name: &str,
-    ssh_user: &str,
-    ssh_priv_path: &str,
-    needs_jump: bool,
-    jumphost_ip: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let status = if needs_jump {
-        ssh_capture_jump(
-            jumphost_ip,
-            ssh_user,
-            ip,
-            ssh_user,
-            ssh_priv_path,
-            "systemctl is-active --quiet containerd && echo ok || echo failed",
-        )?
-    } else {
-        ssh_capture(
-            ip,
-            ssh_user,
-            ssh_priv_path,
-            "systemctl is-active --quiet containerd && echo ok || echo failed",
-        )?
-    };
-
-    if status.trim() == "ok" {
-        Ok(())
-    } else {
-        Err(format!(
-            "✗ containerd is not running on {name} ({ip})\n  \
-             Cloud-init may still be installing packages. \
-             Please wait a moment and try again, or manually run:\n  \
-             sudo systemctl restart containerd"
-        )
-        .into())
-    }
-}
-
 /// Merge `spec_names` (in order) from `specs_map` into a single
 /// [`MergedSpec`].  Later entries override earlier ones for scalar fields.
 /// For `cert_sans` all layers are unioned and deduplicated (first-seen wins
@@ -375,34 +331,4 @@ pub fn common_merge_spec_configs(
         control_plane_endpoint,
         cert_sans,
     })
-}
-
-/// Polls every 15 s for up to 10 minutes until containerd is active,
-/// then delegates to `check_containerd_running` for the final assertion.
-pub fn wait_for_containerd(
-    ip: &str,
-    name: &str,
-    user: &str,
-    priv_key: &str,
-    needs_jump: bool,
-    jumphost_ip: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    const INTERVAL: Duration = Duration::from_secs(15);
-    const MAX_ATTEMPTS: u32 = 40; // 40 × 15 s = 10 min
-
-    println!("  ⏳ Waiting for containerd on {name} …");
-
-    for attempt in 1..=MAX_ATTEMPTS {
-        let result = check_containerd_running(ip, name, user, priv_key, needs_jump, jumphost_ip);
-        if result.is_ok() {
-            return Ok(());
-        }
-        println!(
-            "    [{attempt}/{MAX_ATTEMPTS}] not ready yet — retrying in {}s …",
-            INTERVAL.as_secs()
-        );
-        thread::sleep(INTERVAL);
-    }
-
-    Err(format!("containerd on {name} did not become ready within the timeout").into())
 }
