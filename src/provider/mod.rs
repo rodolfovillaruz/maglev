@@ -118,6 +118,21 @@ pub trait Provider {
         Err("Disk attachment is not implemented for this provider".into())
     }
 
+    fn detach_disk(
+        &self,
+        _disk_id: &str,
+        _instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Err("Disk detachment is not implemented for this provider".into())
+    }
+
+    fn get_disk_attached_instance(
+        &self,
+        _disk_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        Ok(None)
+    }
+
     // ADD THIS METHOD
     fn destroy_disk(&self, _disk_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         Err("Disk destruction is not implemented for this provider".into())

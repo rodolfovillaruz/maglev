@@ -82,6 +82,134 @@ pub fn apply_config(
         }
     }
 
+    let provider = loaded.provider();
+
+    // Look up provisioner details for Kubernetes node validation and deletion
+    let mut provisioner_ip = String::new();
+    let mut provisioner_user = String::new();
+    let mut provisioner_priv_key = String::new();
+
+    if let Some(prov) = &common.provisioner {
+        for r in &resolved {
+            if r.nodes.contains(&prov.node) {
+                let prefer_public = prov.provisioner_type == "public";
+                let target = match &loaded {
+                    LoadedProvider::Gcp { .. } => prov.node.as_str(),
+                    LoadedProvider::DigitalOcean { .. } => state
+                        .instances
+                        .get(&prov.node)
+                        .map(|s| s.as_str())
+                        .unwrap_or(prov.node.as_str()),
+                };
+
+                if let Ok(ip) = provider.get_vm_ip(target, prefer_public) {
+                    provisioner_ip = ip;
+                }
+                provisioner_user = r.merged.user.clone();
+                provisioner_priv_key = expand_tilde(&r.merged.ssh_public_key.replace(".pub", ""));
+                break;
+            }
+        }
+    }
+
+    if !instances_to_delete.is_empty() || !disks_to_delete.is_empty() {
+        println!("\n── Pre-Destruction Checks ───────────────────────────────────────────────");
+
+        for node in &instances_to_delete {
+            if !provisioner_ip.is_empty() {
+                println!("Verifying if node \"{node}\" is connected to the cluster...");
+                let check_cmd = format!(
+                    "kubectl --kubeconfig {} get node {}",
+                    ADMIN_KUBECONFIG, node
+                );
+
+                if ssh_capture(
+                    &provisioner_ip,
+                    &provisioner_user,
+                    &provisioner_priv_key,
+                    &check_cmd,
+                )
+                .is_ok()
+                {
+                    println!("  ✓ Node \"{node}\" is connected to the cluster.");
+
+                    if prompt_yes_no(&format!("Cordon node \"{node}\"?"), auto_approve) {
+                        let cordon_cmd =
+                            format!("kubectl --kubeconfig {} cordon {}", ADMIN_KUBECONFIG, node);
+                        if let Err(e) = ssh_run(
+                            &provisioner_ip,
+                            &provisioner_user,
+                            &provisioner_priv_key,
+                            &cordon_cmd,
+                        ) {
+                            eprintln!("  ⚠ Failed to cordon node \"{node}\": {}", e);
+                        }
+                    }
+
+                    if prompt_yes_no(&format!("Drain node \"{node}\"?"), auto_approve) {
+                        let drain_cmd = format!(
+                            "kubectl --kubeconfig {} drain {} --ignore-daemonsets --delete-emptydir-data --force",
+                            ADMIN_KUBECONFIG, node
+                        );
+                        if let Err(e) = ssh_run(
+                            &provisioner_ip,
+                            &provisioner_user,
+                            &provisioner_priv_key,
+                            &drain_cmd,
+                        ) {
+                            eprintln!("  ⚠ Failed to drain node \"{node}\": {}", e);
+                        }
+                    }
+
+                    if prompt_yes_no(
+                        &format!("Delete node \"{node}\" from the cluster?"),
+                        auto_approve,
+                    ) {
+                        let del_cmd = format!(
+                            "kubectl --kubeconfig {} delete node {}",
+                            ADMIN_KUBECONFIG, node
+                        );
+                        if let Err(e) = ssh_run(
+                            &provisioner_ip,
+                            &provisioner_user,
+                            &provisioner_priv_key,
+                            &del_cmd,
+                        ) {
+                            eprintln!(
+                                "  ⚠ Failed to delete node \"{node}\" from Kubernetes: {}",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    println!(
+                        "  Node \"{node}\" is not connected to the cluster. Proceeding destructively."
+                    );
+                }
+            }
+        }
+
+        for disk in &disks_to_delete {
+            if let Some(id) = state.disks.get(disk) {
+                println!("Checking if disk \"{disk}\" needs to be detached...");
+                if let Ok(Some(attached_instance)) = provider.get_disk_attached_instance(id) {
+                    println!("Disk \"{disk}\" is attached to instance ID \"{attached_instance}\".");
+                    if prompt_yes_no(
+                        &format!("Detach disk \"{disk}\" from instance \"{attached_instance}\"?"),
+                        auto_approve,
+                    ) {
+                        println!("Detaching disk \"{disk}\"...");
+                        if let Err(e) = provider.detach_disk(id, &attached_instance) {
+                            eprintln!("  ⚠ Failed to detach disk {disk}: {e}");
+                        } else {
+                            println!("Disk \"{disk}\" detached.");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     println!("\n── Execution Plan ───────────────────────────────────────────────────────");
 
     let mut has_changes = false;
@@ -152,8 +280,6 @@ pub fn apply_config(
         }
     }
 
-    let provider = loaded.provider();
-
     // 2. Destroy disks
     if !disks_to_delete.is_empty() {
         println!("\n── Destroying Disks ─────────────────────────────────────────────────────");
@@ -174,76 +300,7 @@ pub fn apply_config(
     if !instances_to_delete.is_empty() {
         println!("\n── Destroying Instances ─────────────────────────────────────────────────");
 
-        // Look up provisioner details for Kubernetes node validation and deletion
-        let mut provisioner_ip = String::new();
-        let mut provisioner_user = String::new();
-        let mut provisioner_priv_key = String::new();
-
-        if let Some(prov) = &common.provisioner {
-            for r in &resolved {
-                if r.nodes.contains(&prov.node) {
-                    let prefer_public = prov.provisioner_type == "public";
-                    let target = match &loaded {
-                        LoadedProvider::Gcp { .. } => prov.node.as_str(),
-                        LoadedProvider::DigitalOcean { .. } => state
-                            .instances
-                            .get(&prov.node)
-                            .map(|s| s.as_str())
-                            .unwrap_or(prov.node.as_str()),
-                    };
-
-                    if let Ok(ip) = provider.get_vm_ip(target, prefer_public) {
-                        provisioner_ip = ip;
-                    }
-                    provisioner_user = r.merged.user.clone();
-                    provisioner_priv_key =
-                        expand_tilde(&r.merged.ssh_public_key.replace(".pub", ""));
-                    break;
-                }
-            }
-        }
-
         for node in &instances_to_delete {
-            // Check if node is under the same certificate keys of the provisioner
-            if !provisioner_ip.is_empty() {
-                println!(
-                    "Verifying if node \"{node}\" is under the provisioner's certificate keys..."
-                );
-                let check_cmd = format!(
-                    "kubectl --kubeconfig {} get node {}",
-                    ADMIN_KUBECONFIG, node
-                );
-
-                match ssh_capture(
-                    &provisioner_ip,
-                    &provisioner_user,
-                    &provisioner_priv_key,
-                    &check_cmd,
-                ) {
-                    Ok(_) => {
-                        println!("  ✓ Node \"{node}\" matched. Executing kubectl delete node...");
-                        let del_cmd = format!(
-                            "kubectl --kubeconfig {} delete node {}",
-                            ADMIN_KUBECONFIG, node
-                        );
-                        if let Err(e) = ssh_run(
-                            &provisioner_ip,
-                            &provisioner_user,
-                            &provisioner_priv_key,
-                            &del_cmd,
-                        ) {
-                            eprintln!(
-                                "  ⚠ Failed to delete node \"{node}\" from Kubernetes: {}",
-                                e
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        return Err(format!("Node \"{node}\" is not under the same certificate keys of the provisioner (not found in cluster). Aborting.").into());
-                    }
-                }
-            }
-
             let id = state.instances.get(node).unwrap();
 
             // GCP expects the instance name; DigitalOcean expects the droplet ID

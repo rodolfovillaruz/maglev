@@ -337,6 +337,72 @@ impl Provider for DigitalOceanProvider {
         Ok(())
     }
 
+    fn detach_disk(
+        &self,
+        disk_id: &str,
+        instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let droplet_id: u64 = instance_id.parse().map_err(|_| {
+            format!("Instance ID '{instance_id}' is not a valid numeric DO Droplet ID")
+        })?;
+
+        let request_body = serde_json::json!({
+            "type": "detach",
+            "droplet_id": droplet_id,
+        });
+
+        let url = format!("https://api.digitalocean.com/v2/volumes/{disk_id}/actions");
+        let agent = build_agent();
+        let mut resp = agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send_json(request_body)?;
+
+        let status = resp.status();
+
+        if !status.is_success() {
+            let body: Value = resp.body_mut().read_json()?;
+            return Err(format!(
+                "DigitalOcean API returned HTTP {status} detaching disk '{disk_id}': {body}"
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+
+    fn get_disk_attached_instance(
+        &self,
+        disk_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let url = format!("https://api.digitalocean.com/v2/volumes/{disk_id}");
+        let agent = build_agent();
+        let mut resp = agent
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body: Value = resp.body_mut().read_json()?;
+            return Err(format!(
+                "DigitalOcean API returned HTTP {status} while fetching volume '{disk_id}': {body}"
+            )
+            .into());
+        }
+
+        let body: Value = resp.body_mut().read_json()?;
+        if let Some(droplet_ids) = body["volume"]["droplet_ids"].as_array() {
+            if let Some(id) = droplet_ids.first() {
+                if let Some(id_u64) = id.as_u64() {
+                    return Ok(Some(id_u64.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn destroy_disk(&self, disk_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!("https://api.digitalocean.com/v2/volumes/{disk_id}");
 
