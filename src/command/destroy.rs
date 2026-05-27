@@ -49,6 +49,31 @@ pub fn destroy_config(
 
     let provider = loaded.provider();
 
+    if !state.disks.is_empty() {
+        println!("\n── Pre-Destruction Checks ───────────────────────────────────────────────");
+
+        let disks_to_delete: Vec<(String, String)> = state.disks.clone().into_iter().collect();
+        for (disk_name, disk_id) in disks_to_delete {
+            println!("Checking if disk \"{disk_name}\" needs to be detached...");
+            if let Ok(Some(attached_instance)) = provider.get_disk_attached_instance(&disk_id) {
+                println!(
+                    "Disk \"{disk_name}\" is attached to instance ID \"{attached_instance}\"."
+                );
+                if prompt_yes_no(
+                    &format!("Detach disk \"{disk_name}\" from instance \"{attached_instance}\"?"),
+                    auto_approve,
+                ) {
+                    println!("Detaching disk \"{disk_name}\"...");
+                    if let Err(e) = provider.detach_disk(&disk_id, &attached_instance) {
+                        eprintln!("  ⚠ Failed to detach disk {disk_name}: {e}");
+                    } else {
+                        println!("Disk \"{disk_name}\" detached.");
+                    }
+                }
+            }
+        }
+    }
+
     // 2. Destroy VMs first (This implicitly detaches disks in most cloud providers)
     for (group_name, group_type, node) in &all_nodes {
         let target = match state.instances.get(*node) {
