@@ -213,6 +213,21 @@ pub fn play_config(
         &format!("  SSH-check and provision {primary_cp_name}?"),
         auto_approve,
     ) {
+        println!("  Running cisak to install dependencies ...");
+        let cisak_cmd =
+            "sudo /usr/local/bin/cisak generate && sudo /usr/local/bin/cisak install -y";
+        match jumphost_accessible {
+            true => ssh_run_jump(
+                &jumphost_ip,
+                ssh_user,
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                cisak_cmd,
+            ),
+            false => ssh_run(primary_cp_ip, ssh_user, &ssh_priv_path, cisak_cmd),
+        }?;
+
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
@@ -366,6 +381,21 @@ pub fn play_config(
             if cp_needs_jump {
                 println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
             }
+
+            println!("  Running cisak to install dependencies ...");
+            let cisak_cmd =
+                "sudo /usr/local/bin/cisak generate && sudo /usr/local/bin/cisak install -y";
+            match cp_needs_jump {
+                true => ssh_run_jump(
+                    &jumphost_ip,
+                    ssh_user,
+                    ip,
+                    ssh_user,
+                    &ssh_priv_path,
+                    cisak_cmd,
+                ),
+                false => ssh_run(ip, ssh_user, &ssh_priv_path, cisak_cmd),
+            }?;
 
             ensure_cp_endpoint_resolves(
                 name,
@@ -543,6 +573,21 @@ pub fn play_config(
             println!("  Skipped.");
             continue;
         }
+
+        println!("  Running cisak to install dependencies ...");
+        let cisak_cmd =
+            "sudo /usr/local/bin/cisak generate && sudo /usr/local/bin/cisak install -y";
+        match worker_needs_jump {
+            true => ssh_run_jump(
+                &jumphost_ip,
+                ssh_user,
+                ip,
+                ssh_user,
+                &ssh_priv_path,
+                cisak_cmd,
+            ),
+            false => ssh_run(ip, ssh_user, &ssh_priv_path, cisak_cmd),
+        }?;
 
         let join_check_cmd =
             "test -f /etc/kubernetes/kubelet.conf && echo joined || echo not-joined";
