@@ -419,10 +419,12 @@ pub fn play_config(
                 }?;
             }
 
+            let node_own_private_ip = get_private_ip(name, ip);
+
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                &get_private_ip(name, ip),
+                &provisioner_private_ip,
                 auto_approve,
                 |cmd| match cp_needs_jump {
                     true => {
@@ -457,10 +459,34 @@ pub fn play_config(
             match already_joined {
                 Ok(ref s) if s.trim() == "yes" => {
                     println!("  ✓ {name} already part of the control-plane — skipping.");
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("  ✗ Could not check join status on {name}: {e}");
+                    let _ = ensure_cp_endpoint_resolves(
+                        name,
+                        &cp_endpoint,
+                        &node_own_private_ip,
+                        true,
+                        |cmd| match cp_needs_jump {
+                            true => ssh_capture_jump(
+                                &jumphost_ip,
+                                ssh_user,
+                                ip,
+                                ssh_user,
+                                &ssh_priv_path,
+                                cmd,
+                            ),
+                            false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+                        },
+                        |cmd| match cp_needs_jump {
+                            true => ssh_run_jump(
+                                &jumphost_ip,
+                                ssh_user,
+                                ip,
+                                ssh_user,
+                                &ssh_priv_path,
+                                cmd,
+                            ),
+                            false => ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+                        },
+                    );
                     continue;
                 }
                 _ => {}
@@ -468,6 +494,29 @@ pub fn play_config(
 
             if cp_join_cmd.is_empty() {
                 eprintln!("  ✗ No join command available — skipping {name}.");
+                let _ = ensure_cp_endpoint_resolves(
+                    name,
+                    &cp_endpoint,
+                    &node_own_private_ip,
+                    true,
+                    |cmd| match cp_needs_jump {
+                        true => ssh_capture_jump(
+                            &jumphost_ip,
+                            ssh_user,
+                            ip,
+                            ssh_user,
+                            &ssh_priv_path,
+                            cmd,
+                        ),
+                        false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+                    },
+                    |cmd| match cp_needs_jump {
+                        true => {
+                            ssh_run_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd)
+                        }
+                        false => ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+                    },
+                );
                 continue;
             }
 
@@ -495,6 +544,23 @@ pub fn play_config(
             } else {
                 println!("  Skipped.");
             }
+
+            let _ = ensure_cp_endpoint_resolves(
+                name,
+                &cp_endpoint,
+                &node_own_private_ip,
+                true,
+                |cmd| match cp_needs_jump {
+                    true => {
+                        ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd)
+                    }
+                    false => ssh_capture(ip, ssh_user, &ssh_priv_path, cmd),
+                },
+                |cmd| match cp_needs_jump {
+                    true => ssh_run_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),
+                    false => ssh_run(ip, ssh_user, &ssh_priv_path, cmd),
+                },
+            );
         }
     } else if !is_ha || cp_with_ips.len() <= 1 {
         println!("\n━━ Step 2 / 3 — Additional control-plane nodes ━━━━━━━━━━━━━━━━━━━━━━━━");
