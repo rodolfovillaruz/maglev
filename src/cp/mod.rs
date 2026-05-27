@@ -282,7 +282,7 @@ pub fn ensure_cp_endpoint_resolves(
                 println!(
                     "  ✓ Updated '{host}' in /etc/hosts to {fallback_ip} on {node_name}.\n\
                      \n\
-                     ℹ  This is a temporary placeholder pointing at the primary control-plane IP.\n\
+                     ℹ  This is a temporary placeholder.\n\
                      ℹ  Once your load-balancer is live, run on EVERY node:\n\
                      \n\
                      \t  sudo sed -i '/{host}/d' /etc/hosts\n\
@@ -335,7 +335,7 @@ pub fn ensure_cp_endpoint_resolves(
             println!(
                 "  ✓ Added '{fallback_ip}  {host}' to /etc/hosts on {node_name}.\n\
                  \n\
-                 ℹ  This is a temporary placeholder pointing at the primary control-plane IP.\n\
+                 ℹ  This is a temporary placeholder.\n\
                  ℹ  Once your load-balancer is live, run on EVERY node:\n\
                  \n\
                  \t  sudo sed -i '/{host}/d' /etc/hosts\n\
