@@ -107,7 +107,8 @@ pub fn provision_cilium(
     )?;
 
     // ── Step C: cilium status --wait ──────────────────────────────────────────
-    let cilium_status_cmd = format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait");
+    let cilium_status_cmd =
+        format!("cilium --kubeconfig {ADMIN_KUBECONFIG} status --wait > /dev/null 2>&1");
 
     println!("\n  → Step C: wait for Cilium to become ready");
     println!("    $ {cilium_status_cmd}");
