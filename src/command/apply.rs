@@ -1,5 +1,5 @@
 use crate::command::play::play_config;
-use crate::cp::ADMIN_KUBECONFIG;
+use crate::cp::{ADMIN_KUBECONFIG, ensure_cp_endpoint_resolves};
 use crate::ip::IpAddressType;
 use crate::provider::{LoadedProvider, load_provider};
 use crate::rule::resolve_rules;
@@ -84,10 +84,58 @@ pub fn apply_config(
 
     let provider = loaded.provider();
 
+    // Find CP nodes to compute cp_endpoint and primary_cp_ip
+    let mut first_cp_merged = None;
+    let mut cp_entries: Vec<(String, bool)> = Vec::new();
+
+    for rule in &resolved {
+        let prefer_public = rule.merged.ip_address == IpAddressType::Public;
+        if rule.group_type == "control-plane" {
+            if first_cp_merged.is_none() {
+                first_cp_merged = Some(&rule.merged);
+            }
+            for node in &rule.nodes {
+                cp_entries.push((node.clone(), prefer_public));
+            }
+        }
+    }
+
+    let mut primary_cp_name = String::new();
+    let mut primary_cp_ip = String::new();
+
+    if let Some((name, prefer_public)) = cp_entries.first() {
+        primary_cp_name = name.clone();
+        let identifier = state
+            .instances
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name.as_str());
+        if let Ok(ip) = provider.get_vm_ip(identifier, *prefer_public) {
+            primary_cp_ip = ip;
+        }
+    }
+
+    let cp_endpoint = if let Some(merged) = first_cp_merged {
+        match &merged.control_plane_endpoint {
+            Some(ep) if !ep.trim().is_empty() => {
+                let ep = ep.trim().to_string();
+                if ep.contains(':') {
+                    ep
+                } else {
+                    format!("{ep}:6443")
+                }
+            }
+            _ => format!("{primary_cp_ip}:6443"),
+        }
+    } else {
+        String::new()
+    };
+
     // Look up provisioner details for Kubernetes node validation and deletion
     let mut provisioner_ip = String::new();
     let mut provisioner_user = String::new();
     let mut provisioner_priv_key = String::new();
+    let mut provisioner_node_name = String::new();
 
     if let Some(prov) = &common.provisioner {
         for r in &resolved {
@@ -107,13 +155,49 @@ pub fn apply_config(
                 }
                 provisioner_user = r.merged.user.clone();
                 provisioner_priv_key = expand_tilde(&r.merged.ssh_public_key.replace(".pub", ""));
+                provisioner_node_name = prov.node.clone();
                 break;
             }
+        }
+    } else {
+        if let Some(merged) = first_cp_merged {
+            provisioner_ip = primary_cp_ip.clone();
+            provisioner_user = merged.user.clone();
+            provisioner_priv_key = expand_tilde(&merged.ssh_public_key.replace(".pub", ""));
+            provisioner_node_name = primary_cp_name.clone();
         }
     }
 
     if !instances_to_delete.is_empty() || !disks_to_delete.is_empty() {
         println!("\n── Pre-Destruction Checks ───────────────────────────────────────────────");
+
+        // Sync /etc/hosts for the provisioner so it can reach the cluster
+        if !provisioner_ip.is_empty() && !cp_endpoint.is_empty() && !primary_cp_ip.is_empty() {
+            if let Err(e) = ensure_cp_endpoint_resolves(
+                &provisioner_node_name,
+                &cp_endpoint,
+                &primary_cp_ip,
+                auto_approve,
+                |cmd| {
+                    ssh_capture(
+                        &provisioner_ip,
+                        &provisioner_user,
+                        &provisioner_priv_key,
+                        cmd,
+                    )
+                },
+                |cmd| {
+                    ssh_run(
+                        &provisioner_ip,
+                        &provisioner_user,
+                        &provisioner_priv_key,
+                        cmd,
+                    )
+                },
+            ) {
+                eprintln!("  ⚠ Could not synchronize /etc/hosts on provisioner: {e}");
+            }
+        }
 
         for node in &instances_to_delete {
             if !provisioner_ip.is_empty() {
