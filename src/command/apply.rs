@@ -232,7 +232,7 @@ pub fn apply_config(
 
                     if prompt_yes_no(&format!("Drain node \"{node}\"?"), auto_approve) {
                         let drain_cmd = format!(
-                            "kubectl --kubeconfig {} drain {} --ignore-daemonsets --delete-emptydir-data --force",
+                            "kubectl --kubeconfig {} drain {} --ignore-daemonsets --delete-emptydir-data",
                             ADMIN_KUBECONFIG, node
                         );
                         if let Err(e) = ssh_run(
