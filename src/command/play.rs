@@ -249,7 +249,7 @@ pub fn play_config(
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
-            &get_private_ip(primary_cp_name, primary_cp_ip),
+            &provisioner_private_ip,
             auto_approve,
             |cmd| match jumphost_accessible {
                 true => ssh_capture_jump(
@@ -422,7 +422,7 @@ pub fn play_config(
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                &get_private_ip(name, ip),
+                &provisioner_private_ip,
                 auto_approve,
                 |cmd| match cp_needs_jump {
                     true => {
