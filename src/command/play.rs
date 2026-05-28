@@ -8,7 +8,6 @@ use crate::prompt_yes_no;
 use crate::provider::load_provider;
 use crate::rule::resolve_rules;
 use crate::state::State;
-use crate::structs::CommonMergedSpec;
 use crate::utils::approve_pending_csrs;
 use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 
@@ -38,15 +37,11 @@ pub fn play_config(
 
     let mut cp_entries: Vec<(String, bool)> = Vec::new();
     let mut worker_entries: Vec<(String, bool)> = Vec::new();
-    let mut first_cp_merged: Option<&CommonMergedSpec> = None;
 
     for rule in &resolved {
         let prefer_public = rule.merged.ip_address == IpAddressType::Public;
         match rule.group_type.as_str() {
             "control-plane" => {
-                if first_cp_merged.is_none() {
-                    first_cp_merged = Some(&rule.merged);
-                }
                 for node in &rule.nodes {
                     cp_entries.push((node.clone(), prefer_public));
                 }
@@ -92,14 +87,18 @@ pub fn play_config(
         }
     }
 
-    let first_cp_merged = first_cp_merged.ok_or("No control-plane rules found in config")?;
+    let primary_rule = resolved
+        .iter()
+        .find(|r| r.nodes.contains(&primary_cp_name))
+        .ok_or("Primary control-plane node not found in any rule")?;
+    let primary_merged = &primary_rule.merged;
 
-    let ssh_user = &first_cp_merged.user;
-    let ssh_pub_path = first_cp_merged.ssh_public_key.as_str();
+    let ssh_user = &primary_merged.user;
+    let ssh_pub_path = primary_merged.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
     // Collect certSANs from the primary control-plane spec (already unioned
     // across all spec layers by merge_spec_configs).
-    let cert_sans: Vec<String> = first_cp_merged.cert_sans.clone();
+    let cert_sans: Vec<String> = primary_merged.cert_sans.clone();
 
     let cp_count = cp_entries.len();
     if cp_count == 0 {
@@ -217,7 +216,7 @@ pub fn play_config(
 
     let provisioner_private_ip = get_private_ip(&jumphost_name, &jumphost_ip);
 
-    let cp_endpoint: String = match &first_cp_merged.control_plane_endpoint {
+    let cp_endpoint: String = match &primary_merged.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
             let ep = ep.trim().to_string();
             if ep.contains(':') {
@@ -279,7 +278,7 @@ pub fn play_config(
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
-            &provisioner_private_ip,
+            &primary_cp_ip,
             auto_approve,
             |cmd| match jumphost_accessible {
                 true => ssh_capture_jump(
