@@ -13,11 +13,13 @@ use std::collections::HashMap;
 /// merged spec ready for use.
 pub struct CommonResolvedRule {
     /// Names of every group referenced by this rule.
+    #[allow(dead_code)]
     pub group_names: Vec<String>,
     /// The shared `type` of all groups in this rule (`"control-plane"` /
     /// `"worker"`).
     pub group_type: String,
     /// Names of every spec referenced by this rule (merge order).
+    #[allow(dead_code)]
     pub generic_names: Vec<String>,
     /// Every node name collected from all referenced groups.
     pub nodes: Vec<String>,
