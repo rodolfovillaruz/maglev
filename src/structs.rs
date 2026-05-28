@@ -181,6 +181,16 @@ pub struct CommonConfig {
     pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub provisioner: Option<ProvisionerYaml>,
+    pub control_plane: Option<ControlPlaneYaml>,
     #[allow(unused)]
     pub disks: Option<Vec<DiskYaml>>,
+}
+
+/// Optional designation of the explicit primary control-plane node.
+///
+/// When present, `play` uses the named node as the primary instead of
+/// blindly picking the first control-plane node in the resolved rules.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ControlPlaneYaml {
+    pub primary: String,
 }

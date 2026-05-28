@@ -3,6 +3,8 @@ digitalocean:
   provisioner:
     type: public
     node: maglev-cp-alpha
+  control-plane:
+    primary: maglev-cp-alpha
   groups:
   - name: primary
     type: control-plane

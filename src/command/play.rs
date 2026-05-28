@@ -62,6 +62,36 @@ pub fn play_config(
         }
     }
 
+    // ── Determine primary control-plane ────────────────────────────────────
+    let primary_cp_name_from_config = common.control_plane.as_ref().map(|cp| cp.primary.clone());
+
+    let primary_cp_name = if let Some(ref name) = primary_cp_name_from_config {
+        let found = cp_entries.iter().any(|(n, _)| n == name);
+        if !found {
+            return Err(format!(
+                "control-plane.primary '{}' is not in the list of control-plane nodes",
+                name
+            )
+            .into());
+        }
+        println!("  Primary control-plane (from config): {name}");
+        name.clone()
+    } else {
+        // Fall back to first CP entry (original behaviour)
+        cp_entries
+            .first()
+            .ok_or("No control-plane nodes found")?
+            .0
+            .clone()
+    };
+
+    // Ensure the primary is the first element of cp_entries.
+    if let Some(pos) = cp_entries.iter().position(|(n, _)| n == &primary_cp_name) {
+        if pos != 0 {
+            cp_entries.swap(0, pos);
+        }
+    }
+
     let first_cp_merged = first_cp_merged.ok_or("No control-plane rules found in config")?;
 
     let ssh_user = &first_cp_merged.user;

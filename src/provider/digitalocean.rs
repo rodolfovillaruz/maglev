@@ -1,4 +1,5 @@
 use crate::provider::Provider;
+use crate::structs::ControlPlaneYaml;
 use crate::structs::DiskYaml;
 use crate::structs::{GenericsYaml, GroupYaml, ProvisionerYaml, RuleYaml};
 use serde_json::Value;
@@ -478,6 +479,8 @@ fn resolve_size(machine_type: &str) -> String {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct DoRoot {
     pub digitalocean: DoYaml,
+    #[serde(default)]
+    pub control_plane: Option<ControlPlaneYaml>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

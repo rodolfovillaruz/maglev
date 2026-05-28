@@ -1,4 +1,5 @@
 use crate::provider::Provider;
+use crate::structs::ControlPlaneYaml;
 use crate::structs::{GenericsYaml, GroupYaml, ProvisionerYaml, RuleYaml};
 use crate::utils::prompt_yes_no;
 use std::io::{BufRead, Write, stdin, stdout};
@@ -539,4 +540,6 @@ pub struct GcpYaml {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct GcpRoot {
     pub gcp: GcpYaml,
+    #[serde(default)]
+    pub control_plane: Option<ControlPlaneYaml>,
 }
