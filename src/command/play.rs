@@ -202,20 +202,6 @@ pub fn play_config(
 
     let jumphost_accessible = common.provisioner.is_some() && jumphost_is_public;
 
-    let get_private_ip = |name: &str, fallback: &str| -> String {
-        let identifier = state
-            .instances
-            .get(name)
-            .map(|s| s.as_str())
-            .unwrap_or(name);
-        match provider.get_vm_ip(identifier, false) {
-            Ok(ip) if !ip.trim().is_empty() && ip.to_lowercase() != "null" => ip,
-            _ => fallback.to_string(),
-        }
-    };
-
-    let provisioner_private_ip = get_private_ip(&jumphost_name, &jumphost_ip);
-
     let cp_endpoint: String = match &primary_merged.control_plane_endpoint {
         Some(ep) if !ep.trim().is_empty() => {
             let ep = ep.trim().to_string();
@@ -451,7 +437,7 @@ pub fn play_config(
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                &provisioner_private_ip,
+                &primary_cp_ip,
                 auto_approve,
                 |cmd| match cp_needs_jump {
                     true => {
@@ -736,7 +722,7 @@ pub fn play_config(
         ensure_cp_endpoint_resolves(
             name,
             &cp_endpoint,
-            &provisioner_private_ip,
+            &primary_cp_ip,
             auto_approve,
             |cmd| match worker_needs_jump {
                 true => ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),

@@ -203,7 +203,7 @@ pub fn load_provider(path: &str) -> Result<LoadedProvider, Box<dyn std::error::E
                 generics: yaml.generics,
                 rules: yaml.rules,
                 provisioner: yaml.provisioner,
-                control_plane: root.control_plane,
+                control_plane: yaml.control_plane,
                 disks: yaml.disks,
             },
             location,

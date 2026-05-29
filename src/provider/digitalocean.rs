@@ -479,8 +479,6 @@ fn resolve_size(machine_type: &str) -> String {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct DoRoot {
     pub digitalocean: DoYaml,
-    #[serde(default)]
-    pub control_plane: Option<ControlPlaneYaml>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -495,9 +493,8 @@ pub struct DoYaml {
     pub generics: Vec<GenericsYaml>,
     pub rules: Vec<RuleYaml>,
     pub credentials: DoCredentialsYaml,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioner: Option<ProvisionerYaml>,
-    // Add disks field to DigitalOcean YAML parser
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disks: Option<Vec<DiskYaml>>,
+    #[serde(rename = "control-plane")]
+    pub control_plane: Option<ControlPlaneYaml>,
 }
