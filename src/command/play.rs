@@ -347,7 +347,48 @@ pub fn play_config(
         println!("  Skipped.");
     }
 
+    // ── Compute the cluster CA fingerprint once (used for membership checks) ─
+    let primary_ca_fingerprint: Option<String> = {
+        let cmd = "sudo openssl x509 -noout -fingerprint -sha256 \
+                   -in /etc/kubernetes/pki/ca.crt 2>/dev/null \
+                   | cut -d= -f2";
+        let result = if jumphost_accessible {
+            ssh_capture_jump(
+                &jumphost_ip,
+                ssh_user,
+                primary_cp_ip,
+                ssh_user,
+                &ssh_priv_path,
+                cmd,
+            )
+        } else {
+            ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd)
+        };
+        match result {
+            Ok(fp) if !fp.trim().is_empty() => {
+                let fp = fp.trim().to_string();
+                println!("  Cluster CA fingerprint (SHA-256): {fp}");
+                Some(fp)
+            }
+            Ok(_) => {
+                eprintln!(
+                    "  ⚠  Could not determine cluster CA fingerprint from \
+                     {primary_cp_name} — membership verification will be skipped."
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!(
+                    "  ⚠  Could not determine cluster CA fingerprint: {e} \
+                     — membership verification will be skipped."
+                );
+                None
+            }
+        }
+    };
+
     // ── Step 2 / 3 — Additional control-plane nodes (HA join) ────────────────
+
     if is_ha && cp_with_ips.len() > 1 {
         println!(
             "\n━━ Step 2 / 3 — Additional control-plane nodes ({} nodes) ━━━━━━━━━━━━━━",
@@ -411,35 +452,73 @@ pub fn play_config(
                 },
             )?;
 
-            // Verify actual cluster membership to avoid skipping a node
-            // that has a leftover admin.conf from a failed join.
-            let membership_check =
-                format!("sudo kubectl get node {name} --no-headers 2>/dev/null | wc -l");
-            let is_member = if cp_needs_jump {
-                ssh_capture_jump(
-                    &jumphost_ip,
-                    ssh_user,
-                    primary_cp_ip,
-                    ssh_user,
-                    &ssh_priv_path,
-                    &membership_check,
-                )
-            } else {
-                ssh_capture(ip, ssh_user, &ssh_priv_path, &membership_check)
+            // Check if the node already belongs to this cluster by comparing the CA
+            // certificate fingerprint in /etc/kubernetes/admin.conf (if it exists).
+            let already_joined = match &primary_ca_fingerprint {
+                Some(expected_fp) => {
+                    let check_conf = "test -f /etc/kubernetes/admin.conf && echo yes || echo no";
+                    let conf_exists = if cp_needs_jump {
+                        ssh_capture_jump(
+                            &jumphost_ip,
+                            ssh_user,
+                            ip,
+                            ssh_user,
+                            &ssh_priv_path,
+                            check_conf,
+                        )
+                    } else {
+                        ssh_capture(ip, ssh_user, &ssh_priv_path, check_conf)
+                    };
+                    match conf_exists {
+                        Ok(ref s) if s.trim() == "yes" => {
+                            let fp_cmd = "sudo awk '/certificate-authority-data/{print $2; exit}' \
+                                          /etc/kubernetes/admin.conf \
+                                          | base64 -d \
+                                          | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
+                                          | cut -d= -f2";
+                            let fp = if cp_needs_jump {
+                                ssh_capture_jump(
+                                    &jumphost_ip,
+                                    ssh_user,
+                                    ip,
+                                    ssh_user,
+                                    &ssh_priv_path,
+                                    fp_cmd,
+                                )
+                            } else {
+                                ssh_capture(ip, ssh_user, &ssh_priv_path, fp_cmd)
+                            };
+                            match fp {
+                                Ok(ref f) if f.trim() == expected_fp.as_str() => {
+                                    println!(
+                                        "  ✓ {name} already joined to this cluster (CA fingerprint match) — skipping."
+                                    );
+                                    true
+                                }
+                                Ok(ref f) if !f.trim().is_empty() => {
+                                    eprintln!(
+                                        "  ✗ {name} has an admin.conf but the CA fingerprint does NOT match! (expected: {}, got: {}). Remove the existing /etc/kubernetes directory and retry.",
+                                        expected_fp,
+                                        f.trim()
+                                    );
+                                    true // skip to avoid overwriting
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "  ⚠  Could not extract CA fingerprint from {name} — skipping join."
+                                    );
+                                    true
+                                }
+                            }
+                        }
+                        _ => false, // no admin.conf, proceed
+                    }
+                }
+                None => false, // fingerprint unavailable, proceed without check
             };
 
-            match is_member {
-                Ok(ref count) if count.trim() == "1" => {
-                    println!("  ✓ {name} already a member of the cluster — skipping.");
-                    continue;
-                }
-                Ok(_) => {
-                    println!("  ℹ  {name} not found in the cluster, proceeding with join.");
-                }
-                Err(e) => {
-                    eprintln!("  ⚠  Could not verify membership of {name}: {e}");
-                    continue;
-                }
+            if already_joined {
+                continue;
             }
 
             // Generate a fresh join command for this node (re‑uploads certificates)
@@ -546,45 +625,6 @@ pub fn play_config(
         "\n━━ Step 3 / 3 — Join workers ({} nodes) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         worker_with_ips.len()
     );
-
-    let primary_ca_fingerprint: Option<String> = {
-        let cmd = "sudo openssl x509 -noout -fingerprint -sha256 \
-                   -in /etc/kubernetes/pki/ca.crt 2>/dev/null \
-                   | cut -d= -f2";
-        let result = if jumphost_accessible {
-            ssh_capture_jump(
-                &jumphost_ip,
-                ssh_user,
-                primary_cp_ip,
-                ssh_user,
-                &ssh_priv_path,
-                cmd,
-            )
-        } else {
-            ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cmd)
-        };
-        match result {
-            Ok(fp) if !fp.trim().is_empty() => {
-                let fp = fp.trim().to_string();
-                println!("  Cluster CA fingerprint (SHA-256): {fp}");
-                Some(fp)
-            }
-            Ok(_) => {
-                eprintln!(
-                    "  ⚠  Could not determine cluster CA fingerprint from \
-                     {primary_cp_name} — membership verification will be skipped."
-                );
-                None
-            }
-            Err(e) => {
-                eprintln!(
-                    "  ⚠  Could not determine cluster CA fingerprint: {e} \
-                     — membership verification will be skipped."
-                );
-                None
-            }
-        }
-    };
 
     let worker_join_cmd = {
         let cmd_result = if jumphost_accessible {
