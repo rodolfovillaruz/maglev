@@ -246,8 +246,7 @@ pub fn play_config(
             &format!("    Do you want to install dependencies"),
             auto_approve,
         ) {
-            let cisak_cmd =
-                "sudo /usr/local/bin/cisak generate && sudo /usr/local/bin/cisak install -y";
+            let cisak_cmd = "sudo /usr/local/bin/cisak install --default -y";
             match jumphost_accessible {
                 true => ssh_run_jump(
                     &jumphost_ip,
@@ -419,8 +418,7 @@ pub fn play_config(
                 &format!("    Do you want to install dependencies"),
                 auto_approve,
             ) {
-                let cisak_cmd =
-                    "sudo /usr/local/bin/cisak generate && sudo /usr/local/bin/cisak install -y";
+                let cisak_cmd = "sudo /usr/local/bin/cisak install --default -y";
                 match cp_needs_jump {
                     true => ssh_run_jump(
                         &jumphost_ip,
@@ -615,8 +613,7 @@ pub fn play_config(
             &format!("    Do you want to install dependencies"),
             auto_approve,
         ) {
-            let cisak_cmd =
-                "sudo /usr/local/bin/cisak generate && sudo /usr/local/bin/cisak install -y";
+            let cisak_cmd = "sudo /usr/local/bin/cisak install --default -y";
             match worker_needs_jump {
                 true => ssh_run_jump(
                     &jumphost_ip,
