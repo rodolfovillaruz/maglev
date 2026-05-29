@@ -31,7 +31,7 @@ gcp:
         set -e
 
         apt-get update
-        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.13/cisak-v0.1.13-linux-amd64.tar.gz | tar -xz
+        curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.14/cisak-v0.1.14-linux-amd64.tar.gz | tar -xz
         install -m 755 -o root -g root cisak /usr/local/bin/cisak
       ssh-public-key: ~/.ssh/id_ed25519.pub
       user: ubuntu
