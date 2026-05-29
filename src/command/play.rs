@@ -354,44 +354,6 @@ pub fn play_config(
             cp_with_ips.len() - 1
         );
 
-        let cp_join_script = "\
-            CERT_KEY=$(sudo kubeadm certs certificate-key) && \
-            sudo kubeadm init phase upload-certs \
-                --upload-certs --certificate-key \"$CERT_KEY\" \
-                >/dev/null 2>&1 && \
-            BASE=$(sudo kubeadm token create --print-join-command) && \
-            echo \"$BASE --control-plane --certificate-key $CERT_KEY\"";
-
-        let cp_join_cmd = {
-            let cmd_result = if jumphost_accessible {
-                ssh_capture_jump(
-                    &jumphost_ip,
-                    ssh_user,
-                    primary_cp_ip,
-                    ssh_user,
-                    &ssh_priv_path,
-                    cp_join_script,
-                )
-            } else {
-                ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cp_join_script)
-            };
-
-            match cmd_result {
-                Ok(cmd) if !cmd.is_empty() => cmd,
-                Ok(_) => {
-                    eprintln!(
-                        "  ✗ Empty control-plane join command from {primary_cp_name} \
-                     — is it fully up?"
-                    );
-                    String::new()
-                }
-                Err(e) => {
-                    eprintln!("  ✗ Could not fetch control-plane join command: {e}");
-                    String::new()
-                }
-            }
-        };
-
         for (idx, ((name, ip), (_, prefer_public))) in cp_with_ips
             .iter()
             .skip(1)
@@ -449,35 +411,74 @@ pub fn play_config(
                 },
             )?;
 
-            let already_joined = if cp_needs_jump {
+            // Verify actual cluster membership to avoid skipping a node
+            // that has a leftover admin.conf from a failed join.
+            let membership_check =
+                format!("sudo kubectl get node {name} --no-headers 2>/dev/null | wc -l");
+            let is_member = if cp_needs_jump {
                 ssh_capture_jump(
                     &jumphost_ip,
                     ssh_user,
-                    ip,
+                    primary_cp_ip,
                     ssh_user,
                     &ssh_priv_path,
-                    "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
+                    &membership_check,
                 )
             } else {
-                ssh_capture(
-                    ip,
-                    ssh_user,
-                    &ssh_priv_path,
-                    "test -f /etc/kubernetes/admin.conf && echo yes || echo no",
-                )
+                ssh_capture(ip, ssh_user, &ssh_priv_path, &membership_check)
             };
 
-            match already_joined {
-                Ok(ref s) if s.trim() == "yes" => {
-                    println!("  ✓ {name} already part of the control-plane — skipping.");
+            match is_member {
+                Ok(ref count) if count.trim() == "1" => {
+                    println!("  ✓ {name} already a member of the cluster — skipping.");
                     continue;
+                }
+                Ok(_) => {
+                    println!("  ℹ  {name} not found in the cluster, proceeding with join.");
                 }
                 Err(e) => {
-                    eprintln!("  ✗ Could not check join status on {name}: {e}");
+                    eprintln!("  ⚠  Could not verify membership of {name}: {e}");
                     continue;
                 }
-                _ => {}
             }
+
+            // Generate a fresh join command for this node (re‑uploads certificates)
+            let cp_join_script = "\
+                    CERT_KEY=$(sudo kubeadm certs certificate-key) && \
+                    sudo kubeadm init phase upload-certs \
+                        --upload-certs --certificate-key \"$CERT_KEY\" \
+                        >/dev/null 2>&1 && \
+                    BASE=$(sudo kubeadm token create --print-join-command) && \
+                    echo \"$BASE --control-plane --certificate-key $CERT_KEY\"";
+
+            let cp_join_cmd = {
+                let cmd_result = if jumphost_accessible {
+                    ssh_capture_jump(
+                        &jumphost_ip,
+                        ssh_user,
+                        primary_cp_ip,
+                        ssh_user,
+                        &ssh_priv_path,
+                        cp_join_script,
+                    )
+                } else {
+                    ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, cp_join_script)
+                };
+                match cmd_result {
+                    Ok(cmd) if !cmd.is_empty() => cmd,
+                    Ok(_) => {
+                        eprintln!(
+                            "  ✗ Empty control-plane join command from {primary_cp_name} \
+                                 — is it fully up?"
+                        );
+                        String::new()
+                    }
+                    Err(e) => {
+                        eprintln!("  ✗ Could not fetch control-plane join command: {e}");
+                        String::new()
+                    }
+                }
+            };
 
             if cp_join_cmd.is_empty() {
                 eprintln!("  ✗ No join command available — skipping {name}.");
@@ -502,7 +503,33 @@ pub fn play_config(
                 };
 
                 match result {
-                    Ok(()) => println!("\n  ✓ {name} joined as control-plane."),
+                    Ok(()) => {
+                        println!("\n  ✓ {name} joined as control-plane.");
+                        // Confirm node is now visible
+                        let verify_cmd =
+                            format!("sudo kubectl get node {name} --no-headers 2>/dev/null");
+                        let verify = if cp_needs_jump {
+                            ssh_capture_jump(
+                                &jumphost_ip,
+                                ssh_user,
+                                primary_cp_ip,
+                                ssh_user,
+                                &ssh_priv_path,
+                                &verify_cmd,
+                            )
+                        } else {
+                            ssh_capture(primary_cp_ip, ssh_user, &ssh_priv_path, &verify_cmd)
+                        };
+                        match verify {
+                            Ok(v) if !v.trim().is_empty() => {
+                                println!("  ✓ Node {name} is visible in the cluster.")
+                            }
+                            _ => eprintln!(
+                                "  ⚠  Could not confirm {name} in the cluster yet – it may take a moment to appear."
+                            ),
+                        }
+                    }
+
                     Err(e) => eprintln!("\n  ✗ Failed to join {name}: {e}"),
                 }
             } else {
