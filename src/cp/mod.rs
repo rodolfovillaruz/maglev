@@ -289,27 +289,9 @@ pub fn ensure_cp_endpoint_resolves(
                      \n\
                      ℹ  Then ensure DNS resolves '{host}' to the LB address."
                 );
-                return Ok(());
-            } else {
-                return Err(format!(
-                    "DNS resolution mismatch for '{host}'.\n\
-                     \n\
-                     Currently resolves to: {resolved_ip}\n\
-                     Expected to resolve to: {fallback_ip}\n\
-                     \n\
-                     Update the entry in /etc/hosts on EVERY cluster node\n\
-                     (all control-plane + worker nodes) before re-running 'maglev play':\n\
-                     \n\
-                     \tsudo sed -i '/[[:space:]]{host}[[:space:]]*$/d' /etc/hosts && \
-                     echo '{fallback_ip}  {host}' | sudo tee -a /etc/hosts\n\
-                     \n\
-                     Once a real load-balancer is provisioned, update the entry to point\n\
-                     to the LB address, or delete it and let DNS handle resolution:\n\
-                     \n\
-                     \tsudo sed -i '/{host}/d' /etc/hosts"
-                )
-                .into());
             }
+
+            return Ok(());
         }
     } else {
         eprintln!(
