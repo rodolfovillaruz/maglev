@@ -48,7 +48,7 @@ enum Commands {
         auto_approve: bool,
         /// Force highly-available setup (useful for < 3 nodes)
         #[arg(long, default_value_t = false)]
-        force_ha: bool,
+        single_node: bool,
     },
     Destroy {
         config: String,
@@ -62,7 +62,7 @@ enum Commands {
         /// Skip waiting for containerd; fail immediately if it is not ready
         /// Force highly-available setup (useful for < 3 nodes)
         #[arg(long, default_value_t = false)]
-        force_ha: bool,
+        single_node: bool,
     },
     Reset {
         config: String,
@@ -89,8 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config,
             play,
             auto_approve,
-            force_ha,
-        } => apply_config(&config, play, auto_approve, force_ha),
+            single_node,
+        } => apply_config(&config, play, auto_approve, single_node),
         Commands::Destroy {
             config,
             auto_approve,
@@ -98,8 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Play {
             config,
             auto_approve,
-            force_ha,
-        } => play_config(&config, auto_approve, force_ha),
+            single_node,
+        } => play_config(&config, auto_approve, single_node),
         Commands::Reset {
             config,
             auto_approve,

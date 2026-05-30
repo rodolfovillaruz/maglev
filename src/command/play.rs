@@ -18,7 +18,7 @@ use crate::{ssh_capture, ssh_capture_jump, ssh_run, ssh_run_jump};
 pub fn play_config(
     config_path: &str,
     auto_approve: bool,
-    force_ha: bool,
+    single_node: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Play ===\n");
     println!("Reading config: {config_path}");
@@ -103,29 +103,6 @@ pub fn play_config(
     let cp_count = cp_entries.len();
     if cp_count == 0 {
         return Err("No control-plane nodes found in config.".into());
-    }
-
-    // Include the override flag
-    let is_ha = cp_count >= 3 || force_ha;
-
-    if cp_count == 1 {
-        if force_ha {
-            println!(
-                "\n  ℹ  INFO: Single control-plane node — but HA setup forced \
-                 via flag."
-            );
-        } else {
-            println!(
-                "\n  ℹ  INFO: Single control-plane node — this cluster will \
-                 not be highly available."
-            );
-        }
-    } else if cp_count % 2 == 0 {
-        eprintln!(
-            "\n  ⚠  WARNING: Even number of control-plane nodes ({cp_count}) detected. \
-             An odd count (e.g. 3 or 5) is strongly recommended for proper \
-             etcd quorum. Proceed with caution."
-        );
     }
 
     let primary_cp_prefer_public = cp_entries[0].1;
@@ -223,7 +200,7 @@ pub fn play_config(
         }
     }
 
-    if is_ha && cp_endpoint.starts_with(primary_cp_ip.as_str()) {
+    if !single_node && cp_endpoint.starts_with(primary_cp_ip.as_str()) {
         eprintln!(
             "\n  ⚠  WARNING: control-plane-endpoint is set to the primary node's own \
              IP ({cp_endpoint}).\n\
@@ -309,7 +286,7 @@ pub fn play_config(
 
         if already_init.trim() == "yes" {
             println!("  ✓ {primary_cp_name} already initialised — skipping kubeadm init.");
-            if is_ha {
+            if !single_node {
                 verify_control_plane_endpoint(
                     primary_cp_ip,
                     primary_cp_name,
@@ -336,7 +313,7 @@ pub fn play_config(
                 ssh_user,
                 &ssh_priv_path,
                 &cp_endpoint,
-                is_ha,
+                !single_node,
                 jumphost_accessible,
                 &jumphost_ip,
                 auto_approve,
@@ -389,7 +366,7 @@ pub fn play_config(
 
     // ── Step 2 / 3 — Additional control-plane nodes (HA join) ────────────────
 
-    if is_ha && cp_with_ips.len() > 1 {
+    if !single_node && cp_with_ips.len() > 1 {
         println!(
             "\n━━ Step 2 / 3 — Additional control-plane nodes ({} nodes) ━━━━━━━━━━━━━━",
             cp_with_ips.len() - 1
@@ -546,7 +523,7 @@ pub fn play_config(
                 println!("  Skipped.");
             }
         }
-    } else if !is_ha || cp_with_ips.len() <= 1 {
+    } else if single_node || cp_with_ips.len() <= 1 {
         println!("\n━━ Step 2 / 3 — Additional control-plane nodes ━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("  No additional control-plane nodes to join.");
     }

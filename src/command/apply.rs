@@ -16,7 +16,7 @@ pub fn apply_config(
     config_path: &str,
     play: bool,
     auto_approve: bool,
-    force_ha: bool,
+    single_node: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Maglev Apply ===\n");
     println!("Reading config: {config_path}");
@@ -497,7 +497,7 @@ pub fn apply_config(
 
     if play {
         println!("\n── --play flag set: handing off to play ────────────────────────────────");
-        play_config(config_path, auto_approve, force_ha)?;
+        play_config(config_path, auto_approve, single_node)?;
     }
 
     Ok(())
