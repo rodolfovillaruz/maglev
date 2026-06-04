@@ -2,6 +2,7 @@ use crate::ip::IpAddressType;
 use crate::provider::load_provider;
 use crate::rule::resolve_rules;
 use crate::ssh::{ssh_run, ssh_run_jump};
+use crate::state::State;
 use crate::utils::{expand_tilde, prompt_yes_no};
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,9 @@ pub fn restart_config(
     loaded.describe();
 
     let resolved = resolve_rules(common)?;
+
+    // Load state to map node names to instance IDs
+    let state = State::load(config_path);
 
     // Collect all nodes (both control-plane and worker)
     let mut all_nodes: Vec<(String, bool)> = Vec::new(); // (node_name, prefer_public)
@@ -58,7 +62,14 @@ pub fn restart_config(
     let nodes_with_ips: Vec<(String, String, bool)> = all_nodes
         .iter()
         .map(|(name, prefer_public)| {
-            let ip = provider.get_vm_ip(name, *prefer_public)?;
+            // Look up the instance ID from the state file (created during `apply`)
+            let instance_id = state.instances.get(name).ok_or_else(|| {
+                format!(
+                    "No instance ID found for node '{}' in state. Run 'apply' first.",
+                    name
+                )
+            })?;
+            let ip = provider.get_vm_ip(instance_id, *prefer_public)?;
             println!(
                 "  {name:<30} →  {ip}  ({})",
                 if *prefer_public { "public" } else { "private" }
