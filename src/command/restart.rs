@@ -4,6 +4,7 @@ use crate::rule::resolve_rules;
 use crate::ssh::{ssh_run, ssh_run_jump};
 use crate::state::State;
 use crate::utils::{expand_tilde, prompt_yes_no};
+use std::thread;
 
 // ---------------------------------------------------------------------------
 // `restart` subcommand
@@ -51,7 +52,7 @@ pub fn restart_config(
         .merged
         .clone();
 
-    let ssh_user = &first_cp_spec.user;
+    let ssh_user = first_cp_spec.user.clone();
     let ssh_pub_path = first_cp_spec.ssh_public_key.as_str();
     let ssh_priv_path = expand_tilde(ssh_pub_path.strip_suffix(".pub").unwrap_or(ssh_pub_path));
 
@@ -62,7 +63,6 @@ pub fn restart_config(
     let nodes_with_ips: Vec<(String, String, bool)> = all_nodes
         .iter()
         .map(|(name, prefer_public)| {
-            // Look up the instance ID from the state file (created during `apply`)
             let instance_id = state.instances.get(name).ok_or_else(|| {
                 format!(
                     "No instance ID found for node '{}' in state. Run 'apply' first.",
@@ -79,13 +79,14 @@ pub fn restart_config(
         .collect::<Result<_, Box<dyn std::error::Error>>>()?;
 
     println!("\n  SSH user: {ssh_user}  private key: {ssh_priv_path}");
-    println!("\n⚠  All nodes will be rebooted. Services will be temporarily unavailable.");
+    println!("⚠  All nodes will be rebooted. Services will be temporarily unavailable.");
 
     if !prompt_yes_no("\nProceed with restarting all nodes?", auto_approve) {
         println!("Aborted.");
         return Ok(());
     }
 
+    // Determine primary control-plane IP for jumphost usage
     let primary_cp_ip = nodes_with_ips
         .iter()
         .find(|(_, _, pp)| *pp)
@@ -93,43 +94,51 @@ pub fn restart_config(
         .or_else(|| nodes_with_ips.first().map(|(_, ip, _)| ip.clone()))
         .ok_or("No nodes available")?;
 
-    // Restart each node
-    for (idx, (name, ip, prefer_public)) in nodes_with_ips.iter().enumerate() {
-        println!("\n  [{}/{}] {name}  ({ip})", idx + 1, nodes_with_ips.len());
+    // Precompute whether any node has a public IP (needed for jump logic)
+    let has_public_node = nodes_with_ips.iter().any(|(_, _, pp)| *pp);
 
-        if !prompt_yes_no(&format!("  Restart {name}?"), auto_approve) {
-            println!("  Skipped.");
-            continue;
-        }
+    // Restart all nodes in parallel
+    println!("\nSending reboot signals to all nodes in parallel …");
 
-        let needs_jump = !prefer_public && nodes_with_ips.iter().find(|(_, _, pp)| *pp).is_some();
+    thread::scope(|s| {
+        let handles: Vec<_> = nodes_with_ips
+            .iter()
+            .map(|(name, ip, prefer_public)| {
+                let name = name.clone();
+                let ip = ip.clone();
+                let ssh_user = ssh_user.clone();
+                let ssh_priv_path = ssh_priv_path.clone();
+                let primary_cp_ip = primary_cp_ip.clone();
+                s.spawn(move || {
+                    let needs_jump = !prefer_public && has_public_node;
+                    let result = if needs_jump {
+                        ssh_run_jump(
+                            &primary_cp_ip,
+                            &ssh_user,
+                            &ip,
+                            &ssh_user,
+                            &ssh_priv_path,
+                            "sudo reboot",
+                        )
+                    } else {
+                        ssh_run(&ip, &ssh_user, &ssh_priv_path, "sudo reboot")
+                    };
+                    (name, result.map_err(|e| e.to_string()))
+                })
+            })
+            .collect();
 
-        println!("  Sending reboot signal …");
-        let result = if needs_jump {
-            ssh_run_jump(
-                &primary_cp_ip,
-                ssh_user,
-                ip,
-                ssh_user,
-                &ssh_priv_path,
-                "sudo reboot",
-            )
-        } else {
-            ssh_run(ip, ssh_user, &ssh_priv_path, "sudo reboot")
-        };
-
-        match result {
-            Ok(()) => println!("  ✓ {name} reboot initiated."),
-            Err(e) => {
-                // Reboot may close connection immediately, so connection errors are acceptable
-                if e.to_string().contains("status") || e.to_string().contains("exited") {
-                    println!("  ✓ {name} reboot initiated (connection closed).");
-                } else {
-                    eprintln!("  ✗ Failed to restart {name}: {e}");
+        for handle in handles {
+            let (name, result) = handle.join().unwrap();
+            match result {
+                Ok(()) => println!("  ✓ {name} reboot initiated."),
+                Err(e) if e.contains("status") || e.contains("exited") => {
+                    println!("  ✓ {name} reboot initiated (connection closed).")
                 }
+                Err(e) => eprintln!("  ✗ Failed to restart {name}: {e}"),
             }
         }
-    }
+    });
 
     println!("\n✓ Restart signals sent to all nodes.");
     println!("  Nodes will be available again in 1-2 minutes.");
