@@ -12,6 +12,7 @@ pub mod cilium;
 
 pub const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
 
+#[allow(clippy::too_many_arguments)]
 pub fn provision_control_plane_node(
     cp_ip: &str,
     cp_name: &str,
@@ -260,7 +261,7 @@ pub fn ensure_cp_endpoint_resolves(
     if !resolved_ip.is_empty() {
         if resolved_ip == fallback_ip {
             println!("  ✓ '{host}' resolves to {resolved_ip}.");
-            return Ok(());
+            Ok(())
         } else {
             eprintln!(
                 "\n  ⚠  '{host}' currently resolves to {resolved_ip} on {node_name},\n\
@@ -291,7 +292,7 @@ pub fn ensure_cp_endpoint_resolves(
                 );
             }
 
-            return Ok(());
+            Ok(())
         }
     } else {
         eprintln!(
@@ -324,9 +325,9 @@ pub fn ensure_cp_endpoint_resolves(
                  \n\
                  ℹ  Then ensure DNS resolves '{host}' to the LB address."
             );
-            return Ok(());
+            Ok(())
         } else {
-            return Err(format!(
+            Err(format!(
                 "DNS resolution for '{host}' is required before kubeadm can run.\n\
                  \n\
                  Add the following line to /etc/hosts on EVERY cluster node\n\
@@ -343,7 +344,7 @@ pub fn ensure_cp_endpoint_resolves(
                  \n\
                  \tsudo sed -i '/{host}/d' /etc/hosts"
             )
-            .into());
+            .into())
         }
     }
 }

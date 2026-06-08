@@ -394,13 +394,13 @@ impl Provider for DigitalOceanProvider {
         }
 
         let body: Value = resp.body_mut().read_json()?;
-        if let Some(droplet_ids) = body["volume"]["droplet_ids"].as_array() {
-            if let Some(id) = droplet_ids.first() {
-                if let Some(id_u64) = id.as_u64() {
-                    return Ok(Some(id_u64.to_string()));
-                }
-            }
+        if let Some(droplet_ids) = body["volume"]["droplet_ids"].as_array()
+            && let Some(id) = droplet_ids.first()
+            && let Some(id_u64) = id.as_u64()
+        {
+            return Ok(Some(id_u64.to_string()));
         }
+
         Ok(None)
     }
 

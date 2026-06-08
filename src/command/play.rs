@@ -81,10 +81,10 @@ pub fn play_config(
     };
 
     // Ensure the primary is the first element of cp_entries.
-    if let Some(pos) = cp_entries.iter().position(|(n, _)| n == &primary_cp_name) {
-        if pos != 0 {
-            cp_entries.swap(0, pos);
-        }
+    if let Some(pos) = cp_entries.iter().position(|(n, _)| n == &primary_cp_name)
+        && pos != 0
+    {
+        cp_entries.swap(0, pos);
     }
 
     let primary_rule = resolved
@@ -219,10 +219,7 @@ pub fn play_config(
         &format!("  SSH-check and provision {primary_cp_name}?"),
         auto_approve,
     ) {
-        if prompt_yes_no(
-            &format!("    Do you want to install dependencies"),
-            auto_approve,
-        ) {
+        if prompt_yes_no("    Do you want to install dependencies", auto_approve) {
             let cisak_cmd = "cd /tmp && curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.14/cisak-v0.1.14-linux-amd64.tar.gz | tar -xz && sudo install -m 755 -o root -g root cisak /usr/local/bin/cisak && sudo /usr/local/bin/cisak install --default -y";
             match jumphost_accessible {
                 true => ssh_run_jump(
@@ -240,7 +237,7 @@ pub fn play_config(
         ensure_cp_endpoint_resolves(
             primary_cp_name,
             &cp_endpoint,
-            &primary_cp_ip,
+            primary_cp_ip,
             auto_approve,
             |cmd| match jumphost_accessible {
                 true => ssh_capture_jump(
@@ -394,10 +391,7 @@ pub fn play_config(
                 println!("    (routing through {jumphost_name} @ {jumphost_ip} via ProxyJump)");
             }
 
-            if prompt_yes_no(
-                &format!("    Do you want to install dependencies"),
-                auto_approve,
-            ) {
+            if prompt_yes_no("    Do you want to install dependencies", auto_approve) {
                 let cisak_cmd = "cd /tmp && curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.14/cisak-v0.1.14-linux-amd64.tar.gz | tar -xz && sudo install -m 755 -o root -g root cisak /usr/local/bin/cisak && sudo /usr/local/bin/cisak install --default -y";
                 match cp_needs_jump {
                     true => ssh_run_jump(
@@ -415,7 +409,7 @@ pub fn play_config(
             ensure_cp_endpoint_resolves(
                 name,
                 &cp_endpoint,
-                &primary_cp_ip,
+                primary_cp_ip,
                 auto_approve,
                 |cmd| match cp_needs_jump {
                     true => {
@@ -584,10 +578,7 @@ pub fn play_config(
             continue;
         }
 
-        if prompt_yes_no(
-            &format!("    Do you want to install dependencies"),
-            auto_approve,
-        ) {
+        if prompt_yes_no("    Do you want to install dependencies", auto_approve) {
             let cisak_cmd = "cd /tmp && curl -fsSL https://github.com/rodolfovillaruz/cisak/releases/download/v0.1.14/cisak-v0.1.14-linux-amd64.tar.gz | tar -xz && sudo install -m 755 -o root -g root cisak /usr/local/bin/cisak && sudo /usr/local/bin/cisak install --default -y";
             match worker_needs_jump {
                 true => ssh_run_jump(
@@ -694,7 +685,7 @@ pub fn play_config(
         ensure_cp_endpoint_resolves(
             name,
             &cp_endpoint,
-            &primary_cp_ip,
+            primary_cp_ip,
             auto_approve,
             |cmd| match worker_needs_jump {
                 true => ssh_capture_jump(&jumphost_ip, ssh_user, ip, ssh_user, &ssh_priv_path, cmd),

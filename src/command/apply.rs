@@ -172,8 +172,10 @@ pub fn apply_config(
         println!("\n── Pre-Destruction Checks ───────────────────────────────────────────────");
 
         // Sync /etc/hosts for the provisioner so it can reach the cluster
-        if !provisioner_ip.is_empty() && !cp_endpoint.is_empty() && !primary_cp_ip.is_empty() {
-            if let Err(e) = ensure_cp_endpoint_resolves(
+        if !provisioner_ip.is_empty()
+            && !cp_endpoint.is_empty()
+            && !primary_cp_ip.is_empty()
+            && let Err(e) = ensure_cp_endpoint_resolves(
                 &provisioner_node_name,
                 &cp_endpoint,
                 &primary_cp_ip,
@@ -194,9 +196,9 @@ pub fn apply_config(
                         cmd,
                     )
                 },
-            ) {
-                eprintln!("  ⚠ Could not synchronize /etc/hosts on provisioner: {e}");
-            }
+            )
+        {
+            eprintln!("  ⚠ Could not synchronize /etc/hosts on provisioner: {e}");
         }
 
         for node in &instances_to_delete {
@@ -435,13 +437,13 @@ pub fn apply_config(
 
                 let mut id_str = response.to_string();
 
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&id_str) {
-                    if let Some(id_val) = parsed.pointer("/droplet/id") {
-                        if let Some(num) = id_val.as_u64() {
-                            id_str = num.to_string();
-                        } else if let Some(s) = id_val.as_str() {
-                            id_str = s.to_string();
-                        }
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&id_str)
+                    && let Some(id_val) = parsed.pointer("/droplet/id")
+                {
+                    if let Some(num) = id_val.as_u64() {
+                        id_str = num.to_string();
+                    } else if let Some(s) = id_val.as_str() {
+                        id_str = s.to_string();
                     }
                 }
 

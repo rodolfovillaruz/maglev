@@ -8,15 +8,11 @@
 /// Omitting the field is equivalent to `"private"`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[derive(Default)]
 pub enum IpAddressType {
     Public,
+    #[default]
     Private,
-}
-
-impl Default for IpAddressType {
-    fn default() -> Self {
-        IpAddressType::Private
-    }
 }
 
 impl std::fmt::Display for IpAddressType {

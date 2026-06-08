@@ -15,12 +15,11 @@ impl State {
     /// Loads the `.state` file if it exists, otherwise creates an empty state.
     pub fn load(config_path: &str) -> Self {
         let path = Self::file_path(config_path);
-        if Path::new(&path).exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(state) = serde_json::from_str(&content) {
-                    return state;
-                }
-            }
+        if Path::new(&path).exists()
+            && let Ok(content) = fs::read_to_string(&path)
+            && let Ok(state) = serde_json::from_str(&content)
+        {
+            return state;
         }
         Self::default()
     }
