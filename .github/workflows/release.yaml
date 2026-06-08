@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write   # needed to create GitHub Releases & upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BINARY_NAME: maglev
+
+jobs:
+  # ── Validate the tag matches Cargo.toml version ─────────────────────────────
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract Cargo.toml version
+        id: cargo_version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare tag vs Cargo.toml
+        run: |
+          TAG="${{ github.ref_name }}"
+          CARGO="${{ steps.cargo_version.outputs.version }}"
+          if [[ "$TAG" != "$CARGO" ]]; then
+            echo "::error::Git tag ($TAG) does not match Cargo.toml version ($CARGO)"
+            exit 1
+          fi
+
+  # ── Build static binaries ───────────────────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static x86-64 (musl)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: false
+            archive_suffix: linux-amd64
+
+          # Static ARM64 (musl, cross-compiled)
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            archive_suffix: linux-arm64
+
+          # GNU x86-64 (wider glibc compatibility)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+            archive_suffix: linux-amd64-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # ── Toolchain ────────────────────────────────────────────────────────────
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── musl libc for native builds ──────────────────────────────────────────
+      - name: Install musl-tools (x86_64-musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # ── Cross for cross-compiled targets ─────────────────────────────────────
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      # ── Cache ────────────────────────────────────────────────────────────────
+      - name: Cache cargo registry & build artefacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-release-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # ── Compile ──────────────────────────────────────────────────────────────
+      - name: Build (cargo)
+        if: matrix.cross == false
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      # ── Package ──────────────────────────────────────────────────────────────
+      - name: Create release archive
+        id: package
+        run: |
+          TAG="${{ github.ref_name }}"
+          ARCHIVE="${{ env.BINARY_NAME }}-${TAG}-${{ matrix.archive_suffix }}.tar.gz"
+          BINARY="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+          # Create staging directory with files
+          mkdir -p staging
+          cp "$BINARY" staging/
+          cp README.md staging/
+
+          # Create archive from staging
+          tar -czf "$ARCHIVE" -C staging .
+          rm -rf staging
+
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SHA-256 checksum
+        run: |
+          sha256sum "${{ steps.package.outputs.archive }}" \
+            > "${{ steps.package.outputs.archive }}.sha256"
+
+      # ── Upload artefacts for the next job ────────────────────────────────────
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          retention-days: 1
+
+  # ── Publish to crates.io ────────────────────────────────────────────────────
+  publish:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    environment: crates-io   # optional: add a protected environment for approval
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  # ── Create GitHub Release ───────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all release artefacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${{ github.ref_name }}"
+          cat <<EOF > release-notes.md
+          ### Installation
+
+          #### via \`cargo install\`
+          \`\`\`bash
+          cargo install maglev --locked
+          \`\`\`
+
+          #### Pre-built binary (Linux)
+          \`\`\`bash
+          # x86-64 (static, musl)
+          curl -fsSL https://github.com/${{ github.repository }}/releases/download/${TAG}/maglev-${TAG}-linux-amd64.tar.gz | tar -xz
+          sudo mv maglev /usr/local/bin/
+
+          # ARM64 (static, musl)
+          curl -fsSL https://github.com/${{ github.repository }}/releases/download/${TAG}/maglev-${TAG}-linux-arm64.tar.gz | tar -xz
+          sudo mv maglev /usr/local/bin/
+          \`\`\`
+
+          ### Checksums
+          \`\`\`
+          $(cat dist/*.sha256)
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: "maglev ${{ github.ref_name }}"
+          body_path: release-notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
