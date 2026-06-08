@@ -82,7 +82,7 @@ enum Commands {
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv()?;
     let cli = Cli::parse();
     match cli.command {
         Commands::Apply {
